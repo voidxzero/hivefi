@@ -3,16 +3,16 @@ visualizer + waveform seek bar, lock layout, named layouts, and the session that
 import json
 
 from PyQt6.QtCore import QByteArray, QEvent, QPoint, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QActionGroup, QKeySequence
-from PyQt6.QtWidgets import (QDockWidget, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton,
-                             QSlider, QStyle, QTabBar, QToolBar, QVBoxLayout, QWidget)
+from PyQt6.QtGui import QActionGroup, QKeySequence, QShortcut
+from PyQt6.QtWidgets import (QDockWidget, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox,
+                             QPushButton, QSizePolicy, QSlider, QStyle, QTabBar, QToolBar, QVBoxLayout, QWidget)
 
 from .. import session, waveform
 from .seekbar import STYLES as SEEK_STYLES, SeekBar
 from .visualizer import STYLES as VIS_STYLES, VisualizerPanel
 
 BUILTIN_LAYOUTS = ("Default", "Minimal", "Now Playing focus", "Everything")
-STATE_VERSION = 2          # bump when docks are added/removed: an older saved arrangement is then ignored
+STATE_VERSION = 3          # bump when docks are added/removed: an older saved arrangement is then ignored
 
 
 def _b64(ba: QByteArray) -> str:
@@ -21,15 +21,6 @@ def _b64(ba: QByteArray) -> str:
 
 def _unb64(s: str) -> QByteArray:
     return QByteArray.fromBase64(s.encode())
-
-
-class PaneDock(QDockWidget):
-    """A dock that says so when the user closes it (a tab hidden behind another tab is not closed)."""
-    closed = pyqtSignal()
-
-    def closeEvent(self, e):
-        super().closeEvent(e)
-        self.closed.emit()
 
 
 class PanelsMixin:
@@ -93,58 +84,6 @@ class PanelsMixin:
     def _make_worker(self, fn):
         from .main_window import Worker
         return Worker(fn, self)
-
-    # ------------------------------------------------------------------ track list as a movable panel
-    def _build_track_list_slot(self):
-        """Central area: the track list (plus a strip with a pop-out button in Edit Mode). Popping it out puts the
-        very same table into a dock that can be moved, floated, tabbed and resized like every other panel."""
-        self.central_box = QWidget()
-        lay = self.central_layout = QVBoxLayout(self.central_box)
-        lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
-        self.tracks_strip = QWidget(); sl = QHBoxLayout(self.tracks_strip); sl.setContentsMargins(6, 2, 6, 2)
-        sl.addWidget(QLabel("Track List")); sl.addStretch()
-        pop = QPushButton("⇱ Pop out into a movable panel"); pop.setFlat(True)
-        pop.clicked.connect(lambda: self._set_tracks_detached(True))
-        sl.addWidget(pop)
-        self.tracks_hint = QLabel("The track list is in its own panel.\nClose that panel (or untick View → Panels → "
-                                  "Track List) to bring it back here.")
-        self.tracks_hint.setAlignment(Qt.AlignmentFlag.AlignCenter); self.tracks_hint.hide()
-        lay.addWidget(self.tracks_strip); lay.addWidget(self.table, 1); lay.addWidget(self.tracks_hint, 1)
-        self.tracks_strip.hide()
-        self.setCentralWidget(self.central_box)
-        self.dock_tracks = PaneDock("Track List", self); self.dock_tracks.setObjectName("dock_tracks")
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.dock_tracks)
-        self.dock_tracks.hide()
-        self.dock_tracks.closed.connect(lambda: self._set_tracks_detached(False))
-        self.tracks_detached = False
-
-    def _set_tracks_detached(self, on, show=True):
-        on = bool(on)
-        if on:
-            if not self.tracks_detached:
-                size, where = self.central_box.size(), self.central_box.mapToGlobal(self.central_box.rect().topLeft())
-                self.dock_tracks.setWidget(self.table)
-                self.tracks_hint.show(); self.tracks_strip.hide()
-                if show:
-                    self.dock_tracks.setFloating(True)
-                    self.dock_tracks.resize(size); self.dock_tracks.move(where + QPoint(30, 30))
-            if show:
-                self.dock_tracks.show()
-        elif self.tracks_detached:
-            self.dock_tracks.hide()
-            self.central_layout.insertWidget(1, self.table, 1)
-            self.table.show(); self.tracks_hint.hide()
-            self.tracks_strip.setVisible(self.edit_mode)
-        self.tracks_detached = on
-        self.cfg.tracks_detached = on
-        if hasattr(self, "act_tracks_panel") and self.act_tracks_panel.isChecked() != on:
-            self.act_tracks_panel.blockSignals(True); self.act_tracks_panel.setChecked(on); self.act_tracks_panel.blockSignals(False)
-
-    def _sync_tracks_slot(self):
-        """After a saved arrangement was restored: the table follows the track list panel's visibility."""
-        want = not self.dock_tracks.isHidden()
-        if want != self.tracks_detached:
-            self._set_tracks_detached(want, show=False)
 
     # ------------------------------------------------------------------ waveform seek bar
     def _load_waveform(self, t):
@@ -212,7 +151,10 @@ class PanelsMixin:
     def _set_edit_mode(self, on):
         """On: panels can be dragged, floated, tabbed, resized and closed. Off: nothing about the layout can change
         (title bars are hidden, separators and splitters are dead, toolbars are fixed)."""
-        self.edit_mode = on = bool(on)
+        was, self.edit_mode = self.edit_mode, bool(on)
+        on = self.edit_mode
+        if on and not was and not getattr(self, "_in_revert", False):
+            self._edit_snapshot = self._layout_snapshot()           # what "Revert" goes back to
         F = QDockWidget.DockWidgetFeature
         for d in self.findChildren(QDockWidget):
             d.setFeatures(F.DockWidgetMovable | F.DockWidgetFloatable | F.DockWidgetClosable if on
@@ -225,16 +167,103 @@ class PanelsMixin:
                 sp.handle(i).setEnabled(on)
         for bar in self.findChildren(QTabBar):                  # tabs of stacked docks
             bar.setMovable(on)
-        if hasattr(self, "tracks_strip"):
-            self.tracks_strip.setVisible(on and not self.tracks_detached)
+        if hasattr(self, "edit_toolbar"):
+            self.edit_toolbar.setVisible(on)
+        self._style_edit_mode(on)
+        for d in self.findChildren(QDockWidget):                   # right-click a panel's title bar for its menu
+            if not d.property("hf_menu"):
+                d.setProperty("hf_menu", True)
+                d.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                d.customContextMenuRequested.connect(lambda pos, d=d: self._dock_menu(d, pos))
         if hasattr(self, "act_edit") and self.act_edit.isChecked() != on:
             self.act_edit.blockSignals(True); self.act_edit.setChecked(on); self.act_edit.blockSignals(False)
         if hasattr(self, "btn_edit"):
             self.btn_edit.blockSignals(True); self.btn_edit.setChecked(on); self.btn_edit.blockSignals(False)
             self.btn_edit.setText("✎ Editing layout — click to lock" if on else "✎ Edit layout")
-        if self.isVisible():
-            self.statusBar().showMessage("Edit mode: drag panels and toolbars, resize them, close or float them. "
-                                         "Turn it off to lock the layout." if on else "Layout locked", 5000)
+        if self.isVisible() and on != was:
+            self.statusBar().showMessage("Edit mode: drag panels and toolbars by their grips and title bars, resize "
+                                         "them, close or float them. Esc or Done locks the layout." if on
+                                         else "Layout locked", 6000)
+
+    def _style_edit_mode(self, on):
+        """Editable panels get a dashed accent frame so it is obvious what can be moved."""
+        accent = getattr(self, "skin_tokens", {}).get("accent", "#4fc3f7")
+        self.setStyleSheet(f"QDockWidget {{ border: 1px dashed {accent}; }}"
+                           f"QToolBar {{ border: 1px dashed {accent}; }}" if on else "")
+
+    def _build_edit_bar(self):
+        """A strip across the top of the central area while Edit Mode is on."""
+        bar = self.edit_bar = QFrame()
+        lay = QHBoxLayout(bar); lay.setContentsMargins(8, 2, 8, 2)
+        hint = QLabel("<b>✎ Editing layout</b> — drag panels by their title bars and toolbars by their grips; "
+                      "right-click a panel title for more")
+        hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)   # never widen the window
+        hint.setMinimumWidth(0)                                 # no word wrap: height-for-width made the bar huge
+        lay.addWidget(hint, 1)
+        pb = QPushButton("Panels ▾"); pm = QMenu(pb); pb.setMenu(pm)
+        pm.aboutToShow.connect(lambda: self._fill_panels_menu(pm))
+        buttons = [pb]
+        for text, tip, fn in (("Save layout…", "Save this arrangement under a name", self._save_layout),
+                              ("Reset", "Back to the default arrangement", self._reset_layout),
+                              ("Revert", "Undo everything done since Edit Mode was turned on", self._revert_layout),
+                              ("Done", "Lock the layout (Esc)", lambda: self._set_edit_mode(False))):
+            b = QPushButton(text); b.setToolTip(tip); b.clicked.connect(lambda _c=False, f=fn: f()); buttons.append(b)
+        for b in buttons:
+            lay.addWidget(b)
+        tb = self.edit_toolbar = QToolBar("Edit Layout", self)      # a full-width row under the other toolbars
+        tb.setObjectName("tb_editbar"); tb.setMovable(False); tb.setFloatable(False)
+        tb.setAllowedAreas(Qt.ToolBarArea.TopToolBarArea)
+        bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        tb.addWidget(bar)
+        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, tb)
+        tb.hide()
+        QShortcut(QKeySequence(Qt.Key.Key_Escape), self, lambda: self.edit_mode and self._set_edit_mode(False))
+        return bar
+
+    def _fill_panels_menu(self, menu):
+        menu.clear()
+        for d in (self.dock_sources, self.dock_browser, self.dock_tracks, self.dock_np, self.dock_next, self.dock_lyrics,
+                  self.dock_info, self.dock_eq, self.dock_vis):
+            menu.addAction(d.toggleViewAction())
+        menu.addSeparator()
+        for tb in self.toolbars:
+            menu.addAction(tb.toggleViewAction())
+
+    def _revert_layout(self):
+        snap = getattr(self, "_edit_snapshot", None)
+        if not snap:
+            return
+        self._in_revert = True
+        try:
+            self._apply_layout_snapshot(snap)
+        finally:
+            self._in_revert = False
+        self.statusBar().showMessage("Layout reverted to how it was when editing started", 5000)
+
+    def _dock_menu(self, dock, pos):
+        """Right-click on a panel's title bar (Edit Mode)."""
+        if not self.edit_mode or (not dock.isFloating() and pos.y() > 28):
+            return
+        A = Qt.DockWidgetArea
+        m = QMenu(self)
+        if dock.isFloating():
+            m.addAction("Dock it", lambda: dock.setFloating(False))
+        else:
+            m.addAction("Float", lambda: dock.setFloating(True))
+            mv = m.addMenu("Move to")
+            for label, area in (("Left", A.LeftDockWidgetArea), ("Right", A.RightDockWidgetArea),
+                                ("Top", A.TopDockWidgetArea), ("Bottom", A.BottomDockWidgetArea)):
+                a = mv.addAction(label); a.setEnabled(self.dockWidgetArea(dock) != area)
+                a.triggered.connect(lambda _c, ar=area: self.addDockWidget(ar, dock))
+            others = [d for d in self.findChildren(QDockWidget) if d is not dock and d.isVisible()]
+            if others:
+                tm = m.addMenu("Stack as a tab with")
+                for o in others:
+                    tm.addAction(o.windowTitle(), lambda o=o: self.tabifyDockWidget(o, dock))
+        m.addSeparator()
+        m.addAction("Close", dock.close)
+        m.exec(dock.mapToGlobal(pos))
 
     def _apply_edit_state(self):
         self._set_edit_mode(self.edit_mode)
@@ -253,7 +282,6 @@ class PanelsMixin:
 
     def _apply_layout_snapshot(self, snap):
         self.restoreState(_unb64(snap["state"]), STATE_VERSION)
-        self._sync_tracks_slot()
         self._apply_edit_state()                                      # restoreState resets dock features
         self._apply_splits(self.browser_split, snap.get("browser", ""))
 
@@ -282,12 +310,11 @@ class PanelsMixin:
         self.statusBar().showMessage(f"Layout '{name}' saved", 4000)
 
     def _apply_builtin_layout(self, name):
-        self._set_tracks_detached(False)
         self.restoreState(self._default_state, STATE_VERSION)
-        docks = (self.dock_sources, self.dock_browser, self.dock_np, self.dock_next,
+        docks = (self.dock_sources, self.dock_browser, self.dock_tracks, self.dock_np, self.dock_next,
                  self.dock_lyrics, self.dock_info, self.dock_eq, self.dock_vis)
-        show = {"Default": (self.dock_sources, self.dock_browser, self.dock_np),
-                "Minimal": (),
+        show = {"Default": (self.dock_sources, self.dock_browser, self.dock_tracks, self.dock_np),
+                "Minimal": (self.dock_tracks,),
                 "Now Playing focus": (self.dock_np, self.dock_lyrics, self.dock_vis),
                 "Everything": docks}[name]
         for d in docks:
@@ -349,7 +376,9 @@ class PanelsMixin:
         s = session.load()
         try:
             src = tuple(s.get("source") or ())
-            if len(src) == 2 and (src[0], src[1]) in self._items:
+            if len(src) == 2 and src[0] == "folder" and isinstance(src[1], (list, tuple)):
+                src = ("folder", tuple(src[1]))                    # JSON turned the folder tuple into a list
+            if len(src) == 2 and ((src[0], src[1]) in self._items or src[0] == "folder"):
                 self.source = src
                 self.refresh_playlists()                           # highlights the saved source in the tree
             self.search.blockSignals(True); self.search.setText(s.get("search", "")); self.search.blockSignals(False)

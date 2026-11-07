@@ -8,7 +8,8 @@ import hashlib
 SONGS = [{"id": str(i), "title": f"Song {i}", "artist": "Band", "album": "Album" + str(i % 2),
           "genre": "Rock", "year": 2000 + i, "track": i, "duration": 120 + i, "bitRate": 320,
           "suffix": "mp3", "size": 1000, "coverArt": "al" + str(i % 2),
-          "albumId": "alb" + str(i % 2), "albumArtist": "Band"} for i in range(1, 8)]
+          "albumId": "alb" + str(i % 2), "albumArtist": "Band",
+          "path": f"Band/Album{i % 2}/{i:02d} Song {i}.mp3"} for i in range(1, 8)]
 
 
 class State:

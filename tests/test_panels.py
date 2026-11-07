@@ -248,7 +248,8 @@ def test_session_roundtrip(win, tmp_path):
 def test_layout_and_sizes_persist(win, tmp_path):
     w = win
     w.dock_sources.setMinimumWidth(10)
-    w.resizeDocks([w.dock_browser], [321], Qt.Orientation.Vertical); wait(100)
+    w.resizeDocks([w.dock_browser, w.dock_tracks], [321, 579], Qt.Orientation.Vertical); wait(100)
+    want = w.dock_browser.height()
     w.browser_split.setSizes([100, 200, 300])
     w.seek.set_style("waveform")
     w.cfg.seek_style = "waveform"
@@ -259,7 +260,7 @@ def test_layout_and_sizes_persist(win, tmp_path):
     w.player.stop(); w.player.mp.shutdown()
     w2 = MainWindow(cfg2, Database(tmp_path / "l.db")); w2.show(); wait(1200)
     try:
-        assert abs(w2.dock_browser.height() - 321) < 25, w2.dock_browser.height()
+        assert abs(w2.dock_browser.height() - want) < 25, (w2.dock_browser.height(), want)
         c = w2.browser_split.sizes(); assert c[0] < c[1] < c[2]
         assert w2.seek.style_name() == "waveform"
     finally:
@@ -342,39 +343,57 @@ def test_album_art_has_a_border():
     assert ic.pixelColor(left, ICON // 2).name() != "#3070c0" and ic.pixelColor(left + BORDER + 1, ICON // 2).name() == "#3070c0"
 
 
-def test_track_list_pops_out_and_back(win, tmp_path):
+def test_track_list_is_a_panel_like_any_other(win, tmp_path):
     w = win
-    assert not w.tracks_detached and w.table.parent() is w.central_box and not w.tracks_strip.isVisible()
+    w.show(); w.resize(1200, 700); wait(300)
+    assert w.table.parent() is w.dock_tracks and w.dock_tracks.isVisible() and w.dock_tracks.windowTitle() == "Track List"
+    assert w.dockWidgetArea(w.dock_tracks) == Qt.DockWidgetArea.TopDockWidgetArea
+    assert w.dock_tracks.toggleViewAction().isChecked()
+    # default proportions: a compact browser above a big track list, side panels slim, nothing wider than the window
+    wait(1500)
+    assert w.dock_browser.height() < w.dock_tracks.height() and w.dock_sources.width() < 400
+    assert w.dock_tracks.geometry().right() <= w.width() and w.width() == 1200
+    # locked by default: no title bar, cannot be dragged around
+    assert w.dock_tracks.titleBarWidget() is not None
+    from PyQt6.QtWidgets import QDockWidget
+    assert w.dock_tracks.features() == QDockWidget.DockWidgetFeature.NoDockWidgetFeatures
     w._set_edit_mode(True)
-    assert w.tracks_strip.isVisible()                        # Edit Mode offers the pop-out button
-    w._set_tracks_detached(True); wait(100)
-    assert w.tracks_detached and w.table.parent() is w.dock_tracks and w.dock_tracks.isVisible()
-    assert w.dock_tracks.isFloating() and w.tracks_hint.isVisible() and w.act_tracks_panel.isChecked()
-    assert w.cfg.tracks_detached
-    assert w.model.rowCount() > 0 and w.table.model() is w.model               # same table, same data and selection
-    # it is a panel like the others: dock it into the right-hand area, tab it with another one
-    w.dock_tracks.setFloating(False); w.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, w.dock_tracks); wait(100)
-    assert not w.dock_tracks.isFloating() and w.dockWidgetArea(w.dock_tracks) == Qt.DockWidgetArea.RightDockWidgetArea
-    # the arrangement survives a restart
+    # move it to the right-hand area, float it, tab it with another panel, hide and show it
+    w.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, w.dock_tracks); wait(100)
+    assert w.dockWidgetArea(w.dock_tracks) == Qt.DockWidgetArea.RightDockWidgetArea and w.model.rowCount() > 0
+    w.dock_tracks.setFloating(True); wait(100)
+    assert w.dock_tracks.isFloating() and w.table.isVisible() and w.table.model() is w.model
+    w.dock_tracks.setFloating(False); w.dock_lyrics.show(); w.tabifyDockWidget(w.dock_lyrics, w.dock_tracks); wait(100)
+    assert w.dock_tracks in w.tabifiedDockWidgets(w.dock_lyrics)
+    w.dock_tracks.toggleViewAction().trigger(); wait(100)
+    assert not w.dock_tracks.isVisible() and not w.dock_tracks.toggleViewAction().isChecked()
+    w.dock_tracks.toggleViewAction().trigger(); wait(100)
+    assert w.dock_tracks.toggleViewAction().isChecked()
+    # the arrangement survives a restart, together with the rest
+    w.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, w.dock_tracks); wait(100)
     w._save_session()
     from hivefi.ui.main_window import MainWindow
     cfg2 = Config.load(w.cfg._path)
-    assert cfg2.tracks_detached
     w.player.stop(); w.player.mp.shutdown()
     w2 = MainWindow(cfg2, Database(tmp_path / "l.db")); w2.show(); wait(1500)
     try:
-        assert w2.tracks_detached and w2.table.parent() is w2.dock_tracks
-        assert w2.dockWidgetArea(w2.dock_tracks) == Qt.DockWidgetArea.RightDockWidgetArea
-        assert not w2.dock_tracks.isHidden() and w2.model.rowCount() > 0
-        # closing the panel brings the table home
-        w2.dock_tracks.close(); wait(100)
-        assert not w2.tracks_detached and w2.table.parent() is w2.central_box and not w2.cfg.tracks_detached
-        w2.act_tracks_panel.setChecked(True); wait(100); assert w2.tracks_detached
-        w2.act_tracks_panel.setChecked(False); wait(100); assert not w2.tracks_detached
-        w2._set_tracks_detached(True); w2._apply_builtin_layout("Default"); wait(100)      # layouts bring it back too
-        assert not w2.tracks_detached and w2.table.parent() is w2.central_box
+        assert w2.dockWidgetArea(w2.dock_tracks) == Qt.DockWidgetArea.LeftDockWidgetArea and w2.dock_tracks.isVisible()
+        assert w2.model.rowCount() > 0 and not w2.edit_mode
+        w2._apply_builtin_layout("Default"); wait(300)                    # layouts put it back in the middle
+        assert w2.dockWidgetArea(w2.dock_tracks) == Qt.DockWidgetArea.TopDockWidgetArea
+        w2._apply_builtin_layout("Minimal"); wait(100)
+        assert w2.dock_tracks.isVisible() and not w2.dock_browser.isVisible()
     finally:
         w2.player.stop(); w2.player.mp.shutdown()
+
+
+def test_track_list_panel_keeps_proportions_when_the_window_grows(win):
+    w = win
+    w.show(); w.resize(1000, 600); wait(1800)
+    b, t = w.dock_browser.height(), w.dock_tracks.height()
+    w.resize(1400, 900); wait(400)
+    b2, t2 = w.dock_browser.height(), w.dock_tracks.height()
+    assert t2 - t > (b2 - b) * 1.5 and t2 > b2 * 1.8                      # the list gets most of the extra height
 
 
 def test_visualizer_colors():
@@ -423,3 +442,54 @@ def test_visualizer_color_choice_is_saved(win):
     assert c2.vis_colors == "custom" and c2.vis_custom == ["#010203", "#040506", "#070809"]
     v2 = visualizer.VisualizerPanel("bars", 24, True, c2.vis_colors, c2.vis_custom)
     assert v2.scheme == "custom" and v2.custom == c2.vis_custom
+
+
+def test_edit_bar_revert_and_dock_menu(win, monkeypatch):
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QDockWidget, QMenu
+    w = win
+    w.show(); wait(200)
+    assert not w.edit_toolbar.isVisible() and w.styleSheet() == ""
+    w.btn_edit.setChecked(True); wait(100)
+    assert w.edit_toolbar.isVisible() and "dashed" in w.styleSheet()                 # visible cue while editing
+    texts = {b.text() for b in w.edit_bar.findChildren(__import__("PyQt6.QtWidgets", fromlist=["QPushButton"]).QPushButton)}
+    assert {"Panels ▾", "Save layout…", "Reset", "Revert", "Done"} <= texts
+    # edit things: move a toolbar, hide a panel, pop out the track list
+    area0 = w.toolBarArea(next(t for t in w.toolbars if t.objectName() == "tb_seek"))
+    w.addToolBar(Qt.ToolBarArea.BottomToolBarArea, next(t for t in w.toolbars if t.objectName() == "tb_seek"))
+    w.dock_sources.hide(); w.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, w.dock_tracks); wait(100)
+    assert not w.dock_sources.isVisible()
+    w._set_edit_mode(True)                                                           # already on: must NOT re-snapshot
+    w._revert_layout(); wait(200)
+    assert w.toolBarArea(next(t for t in w.toolbars if t.objectName() == "tb_seek")) == area0
+    assert w.dock_sources.isVisible() and w.dockWidgetArea(w.dock_tracks) == Qt.DockWidgetArea.TopDockWidgetArea
+    assert w.edit_mode                                                               # reverting does not leave edit mode
+    # the Panels menu lists every panel and toolbar
+    pm = w.edit_bar.findChildren(QMenu)[0]; pm.aboutToShow.emit()
+    names = {a.text().replace("&", "") for a in pm.actions()}
+    assert {"Sources", "Library Browser", "Track List", "Visualizer", "Seek Bar", "Controls"} <= names
+    # right-click menu of a panel's title bar
+    seen = {}
+    def fake_exec(self, *a):
+        seen["items"] = [x.text() for x in self.actions() if x.text()]
+        for x in self.actions():
+            if x.text() == "Float":
+                x.trigger()
+        return None
+    monkeypatch.setattr(QMenu, "exec", fake_exec)
+    w._dock_menu(w.dock_sources, QPoint(20, 10)); wait(100)
+    assert seen["items"][:2] == ["Float", "Move to"] and "Close" in seen["items"]
+    assert w.dock_sources.isFloating()
+    w._dock_menu(w.dock_sources, QPoint(20, 10))                                   # floating panels offer "Dock it"
+    assert seen["items"][0] == "Dock it"
+    w.dock_sources.setFloating(False)
+    seen.clear(); w._dock_menu(w.dock_sources, QPoint(20, 200)); assert not seen   # only the title bar area opens it
+    w._set_edit_mode(False); seen.clear(); w._dock_menu(w.dock_sources, QPoint(20, 10)); assert not seen
+    # Esc locks the layout again
+    w._set_edit_mode(True); w.activateWindow(); w.setFocus(); wait(100)
+    QTest.keyClick(w, Qt.Key.Key_Escape); wait(100)
+    assert not w.edit_mode and not w.edit_toolbar.isVisible() and w.styleSheet() == ""
+    # Done button
+    w._set_edit_mode(True)
+    next(b for b in w.edit_bar.findChildren(__import__("PyQt6.QtWidgets", fromlist=["QPushButton"]).QPushButton) if b.text() == "Done").click()
+    assert not w.edit_mode

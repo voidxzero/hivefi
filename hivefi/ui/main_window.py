@@ -11,7 +11,7 @@ from PyQt6.QtGui import (QAction, QActionGroup, QColor, QCursor, QDesktopService
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget, QFileDialog, QInputDialog, QLabel,
                              QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox, QPushButton, QSlider,
                              QSplitter, QStackedWidget, QStyle, QSystemTrayIcon, QTableView, QToolBar,
-                             QTreeWidget, QTreeWidgetItem, QWidget)
+                             QSizePolicy, QTreeWidget, QTreeWidgetItem, QWidget)
 
 from .. import art, scanner, sync
 from ..config import Config, data_dir
@@ -19,7 +19,7 @@ from ..db import Database
 from ..mpris import Mpris
 from ..player import Player
 from ..subsonic import Subsonic, SubsonicError
-from .. import convert, lyrics, organizer, rgscan, skins, smart, tagedit, updater
+from .. import convert, folders, lyrics, organizer, rgscan, skins, smart, tagedit, updater
 from .album_grid import AlbumGrid
 from .dialogs import TagDialog
 from .audio_dialog import AudioDialog
@@ -118,11 +118,8 @@ class MainWindow(PanelsMixin, QMainWindow):
         self._first_run = not cfg.state
         if cfg.geometry:
             self.restoreGeometry(QByteArray.fromBase64(cfg.geometry.encode()))
-        if cfg.tracks_detached:                                  # the table was in its own panel when last closed
-            self._set_tracks_detached(True, show=False)
         if cfg.state:
             self.restoreState(QByteArray.fromBase64(cfg.state.encode()), STATE_VERSION)
-            self._sync_tracks_slot()
         if cfg.header_state:
             self.table.horizontalHeader().restoreState(QByteArray.fromBase64(cfg.header_state.encode()))
             self._sorted_once = True
@@ -150,9 +147,9 @@ class MainWindow(PanelsMixin, QMainWindow):
 
     def _size_default_docks(self):
         """First-run proportions (needs a laid-out window): a compact browser above the track list, and the two
-        side panels sharing the left column."""
+        side panels sharing the left column. Pairs of docks must be resized together for Qt to honour it."""
         O = Qt.Orientation
-        self.resizeDocks([self.dock_browser], [190], O.Vertical)
+        self.resizeDocks([self.dock_browser, self.dock_tracks], [190, 520], O.Vertical)
         self.resizeDocks([self.dock_sources, self.dock_np], [330, 300], O.Vertical)
 
     # ------------------------------------------------------------ setup
@@ -184,6 +181,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         self.tree = SourceTree(); self.tree.setHeaderHidden(True)
         self.tree.tracksDropped.connect(self._drop_to_playlist); self.tree.setMinimumWidth(170)
         self.tree.itemSelectionChanged.connect(self._on_source)
+        self.tree.itemExpanded.connect(self._fill_folder_children)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._tree_menu)
 
@@ -231,8 +229,13 @@ class MainWindow(PanelsMixin, QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_Return), self.table, self._play_selected,
                   context=Qt.ShortcutContext.WidgetShortcut)
 
-        # The library browser is a panel. The track list lives in the central area and can be popped out into its own
-        # panel (Edit Mode shows a button for it, or View → Panels → Track List) that moves like any other.
+        # Every part of the window is a panel, the track list included. Qt wants a central widget: this one is an
+        # anchor that is as wide as the window but has no height, so the panels take all the room. The browser and
+        # the track list share the top dock area (split vertically) and keep their proportions when the window grows.
+        self._build_edit_bar()
+        anchor = QWidget(); anchor.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        anchor.setMaximumHeight(0); anchor.setMinimumSize(0, 0)
+        self.setCentralWidget(anchor)
         self.setDockNestingEnabled(True)
         self.top_stack.setMinimumHeight(110); self.table.setMinimumHeight(80)
         self.setCorner(Qt.Corner.TopLeftCorner, Qt.DockWidgetArea.LeftDockWidgetArea)
@@ -241,7 +244,8 @@ class MainWindow(PanelsMixin, QMainWindow):
         self.setCorner(Qt.Corner.BottomRightCorner, Qt.DockWidgetArea.RightDockWidgetArea)
         self.dock_browser = self._dock("Library Browser", self.top_stack, "dock_browser",
                                        Qt.DockWidgetArea.TopDockWidgetArea)
-        self._build_track_list_slot()
+        self.dock_tracks = self._dock("Track List", self.table, "dock_tracks", Qt.DockWidgetArea.TopDockWidgetArea)
+        self.splitDockWidget(self.dock_browser, self.dock_tracks, Qt.Orientation.Vertical)
 
         # dockable panels
         self.np_panel = NowPlayingPanel(); self.next_panel = UpNextPanel()
@@ -317,12 +321,10 @@ class MainWindow(PanelsMixin, QMainWindow):
         v.addSeparator()
         self.lib_menu = v.addMenu("Libraries"); self.lib_menu.aboutToShow.connect(self._build_lib_menu)
         pm = v.addMenu("Panels")
-        for d in (self.dock_sources, self.dock_browser, self.dock_np, self.dock_next, self.dock_lyrics,
+        for d in (self.dock_sources, self.dock_browser, self.dock_tracks, self.dock_np, self.dock_next, self.dock_lyrics,
                   self.dock_info, self.dock_eq, self.dock_vis):
             pm.addAction(d.toggleViewAction())
-        self.act_tracks_panel = pm.addAction("Track List (pop out)"); self.act_tracks_panel.setCheckable(True)
-        self.act_tracks_panel.setChecked(self.tracks_detached)
-        self.act_tracks_panel.toggled.connect(self._set_tracks_detached)
+
         pm.addSeparator()
         for tb in self.toolbars:
             pm.addAction(tb.toggleViewAction())
@@ -399,6 +401,10 @@ class MainWindow(PanelsMixin, QMainWindow):
                     if not on:
                         child.setForeground(0, self.palette().placeholderText())
                     self._items[("remote", fid)] = child
+        for src, parent in (("local", self._items[("local", None)]),
+                            ("remote", self._items.get(("remote", None)))):
+            if parent is not None:
+                self._add_folder_node(parent, src, "*", "", "Folders", None)
         self._items[("queue", None)] = item(self.tree, "Now Playing", ("queue", None))
         pls = item(self.tree, "Playlists", None)
         for p in self.db.playlists():
@@ -411,11 +417,85 @@ class MainWindow(PanelsMixin, QMainWindow):
             self._items[("smart", name)] = item(auto, name, ("smart", name))
         for sp in self.db.smart_playlists():
             self._items[("smart", sp["id"])] = item(auto, "★ " + sp["name"], ("smart", sp["id"]))
-        self.tree.expandAll()
+        for top in (lib, pls, auto):
+            top.setExpanded(True)
+        if self.cfg.server_configured:
+            self._items[("remote", None)].setExpanded(True)
+        if sel[0] == "folder" and sel not in self._items:
+            self._reveal_folder(sel[1])                          # the folder tree is built lazily: open the way to it
         self.tree.setCurrentItem(self._items.get(sel, self._items[("all", None)]))
         self.tree.blockSignals(False)
         if sel not in self._items:
             self.source = ("all", None); self.load_source()
+
+    # ------------------------------------------------ folder tree (Navidrome's and this computer's directories)
+    def _folder_index(self, src):
+        """FolderIndex of the enabled tracks of 'local' or 'remote' (rebuilt when the library changed)."""
+        key = (self.db.generation, tuple(self.cfg.libraries_off), tuple(self.cfg.library_dirs))
+        cache = self.__dict__.setdefault("_fi_cache", {})
+        if src in cache and cache[src][0] == key:
+            return cache[src][1]
+        tracks = self._tracks(src)
+        entries = (folders.remote_entries(tracks) if src == "remote"
+                   else folders.local_entries(tracks, self.cfg.library_dirs))
+        cache[src] = (key, folders.FolderIndex(entries))
+        return cache[src][1]
+
+    def _folder_root_name(self, src, root):
+        if src == "remote":
+            return self.cfg.server_folder_names.get(root) or "Navidrome"
+        return root.replace(str(Path.home()), "~", 1)
+
+    def _add_folder_node(self, parent, src, root, prefix, name, count):
+        it = QTreeWidgetItem(parent, [name if count is None else f"{name}  ({count})"])
+        arg = (src, root, prefix)
+        it.setData(0, Qt.ItemDataRole.UserRole, ("folder", arg))
+        self._items[("folder", arg)] = it
+        ph = QTreeWidgetItem(it, ["…"]); ph.setData(0, Qt.ItemDataRole.UserRole + 1, "placeholder")
+        return it
+
+    def _fill_folder_children(self, it):
+        """Create a folder node's sub-folders the first time it is opened (a library can have thousands)."""
+        d = it.data(0, Qt.ItemDataRole.UserRole)
+        if not d or d[0] != "folder" or it.childCount() != 1 or \
+                it.child(0).data(0, Qt.ItemDataRole.UserRole + 1) != "placeholder":
+            return
+        it.takeChild(0)
+        src, root, prefix = d[1]
+        idx = self._folder_index(src)
+        if root == "*":
+            roots = idx.roots()
+            if len(roots) == 1:                                   # one library: show its folders directly
+                r = roots[0][0]
+                for name, pre, cnt in idx.children(r, ""):
+                    self._add_folder_node(it, src, r, pre, name, cnt)
+            else:
+                for r, cnt in roots:
+                    self._add_folder_node(it, src, r, "", self._folder_root_name(src, r), cnt)
+        else:
+            for name, pre, cnt in idx.children(root, prefix):
+                self._add_folder_node(it, src, root, pre, name, cnt)
+
+    def _reveal_folder(self, arg):
+        """Expand the tree down to the folder (src, root, prefix); returns its item or None."""
+        src, root, prefix = arg
+        node = self._items.get(("folder", (src, "*", "")))
+        if node is None:
+            return None
+        self._fill_folder_children(node); node.setExpanded(True)
+        if root != "*":
+            if ("folder", (src, root, "")) in self._items:
+                node = self._items[("folder", (src, root, ""))]
+                self._fill_folder_children(node); node.setExpanded(True)
+            cum = ""
+            for part in [p for p in prefix.split("/") if p]:
+                cum = f"{cum}/{part}" if cum else part
+                nxt = self._items.get(("folder", (src, root, cum)))
+                if nxt is None:
+                    return None
+                node = nxt
+                self._fill_folder_children(node); node.setExpanded(True)
+        return node
 
     def _on_source(self):
         it = self.tree.currentItem()
@@ -429,6 +509,9 @@ class MainWindow(PanelsMixin, QMainWindow):
         if kind == "all": tracks = self._tracks()
         elif kind == "remote" and arg is not None:
             tracks = [t for t in self._tracks("remote") if t.get("folder_id") == arg]
+        elif kind == "folder":
+            src, root, prefix = arg
+            tracks = self._folder_index(src).tracks(root, prefix)
         elif kind in ("local", "remote"): tracks = self._tracks(kind)
         elif kind == "queue": tracks = list(self.player.queue)
         elif kind == "smart": tracks = smart.evaluate(self._tracks(), self._smart_spec(arg))
@@ -437,7 +520,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         saved = (m.genre, m.artist, m.album) if keep else (None, None, None)
         m.genre = m.artist = m.album = m.ids = None
         hh = self.table.horizontalHeader()
-        if kind in ("queue", "playlist", "smart"):               # these keep their own order
+        if kind in ("queue", "playlist", "smart", "folder"):     # these keep their own order
             hh.setSortIndicatorShown(False)
             m.set_tracks(tracks, sort_col=None)
         else:
@@ -457,7 +540,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         self._sel_changed()
 
     def _header_sort(self, section):
-        if self.source[0] in ("queue", "playlist", "smart") or section in (0,):
+        if self.source[0] in ("queue", "playlist", "smart", "folder") or section in (0,):
             return
         hh = self.table.horizontalHeader()
         desc = hh.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder if hh.sortIndicatorSection() == section else False
@@ -674,6 +757,11 @@ class MainWindow(PanelsMixin, QMainWindow):
         elif d and d == ("remote", None):
             m.addAction("Turn Navidrome off" if self.cfg.server_enabled else "Turn Navidrome on",
                         lambda: self.set_library_enabled(Config.NAVIDROME, not self.cfg.server_enabled))
+        elif d and d[0] == "folder":
+            src, root, prefix = d[1]
+            tr = lambda: self._folder_index(src).tracks(root, prefix)
+            m.addAction("Play Folder", lambda: tr() and self.player.play_list(tr(), 0))
+            m.addAction("Queue Folder", lambda: self.player.enqueue(tr()))
         elif d and d[0] == "remote" and d[1] is not None:
             key = Config.server_lib_key(d[1]); on = self.cfg.lib_enabled(key)
             m.addAction("Turn this library off" if on else "Turn this library on",
@@ -953,10 +1041,11 @@ class MainWindow(PanelsMixin, QMainWindow):
         self.cfg.view_mode = mode
         (self.act_albums if mode == "albums" else self.act_browser).setChecked(True)
         self.top_stack.setCurrentIndex(1 if mode == "albums" else 0)
-        if not initial and self.dock_browser.isVisible() and not self.dock_browser.isFloating():
-            total = (self.dock_browser.height() + self.central_box.height()) or 780
+        if not initial and self.dock_browser.isVisible() and self.dock_tracks.isVisible() \
+                and not self.dock_browser.isFloating() and not self.dock_tracks.isFloating():
+            total = (self.dock_browser.height() + self.dock_tracks.height()) or 780
             top = int(total * (0.5 if mode == "albums" else 0.25))
-            self.resizeDocks([self.dock_browser], [top], Qt.Orientation.Vertical)
+            self.resizeDocks([self.dock_browser, self.dock_tracks], [top, total - top], Qt.Orientation.Vertical)
         if not initial:
             self.model.set_filters(genre=None, artist=None, album=None)
             self._fill_browser("genre"); self._refresh_grid(); self._update_status()
@@ -1028,6 +1117,8 @@ class MainWindow(PanelsMixin, QMainWindow):
         self._apply_skin_visuals()
 
     def _apply_skin_visuals(self):
+        if self.edit_mode:
+            self._style_edit_mode(True)                          # the dashed frame follows the skin's accent
         self.model.playing_color = self.skin_tokens["accent"]
         self.model.set_playing(self.model.playing_id)
         self.grid.set_placeholder_color(QColor(self.skin_tokens["button"]))

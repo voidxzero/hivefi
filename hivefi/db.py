@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS smart_playlists(id INTEGER PRIMARY KEY, name TEXT NOT
 
 TRACK_COLS = ("title artist album_artist album genre year track_no disc_no duration "
               "bitrate suffix size rating starred play_count last_played mtime cover_id rg_gain folder_id "
-              "album_id aa_tag").split()
+              "album_id aa_tag rpath").split()
 
 
 class Database:
@@ -54,6 +54,7 @@ class Database:
         self._cache_lock = threading.Lock()
         self._by_id: dict = {}
         self._by_id_for = None
+        self.generation = 0
         self.conn.executescript(SCHEMA)
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tracks)")}
         if "rg_gain" not in cols:   # migration: ReplayGain (dB); force local files to be re-read once
@@ -62,6 +63,9 @@ class Database:
             self.conn.commit()
         if "folder_id" not in cols:   # migration: which Subsonic music folder (library) a server track came from
             self.conn.execute("ALTER TABLE tracks ADD COLUMN folder_id TEXT")
+            self.conn.commit()
+        if "rpath" not in cols:       # migration: the server-side path of a track (for the folder view)
+            self.conn.execute("ALTER TABLE tracks ADD COLUMN rpath TEXT")
             self.conn.commit()
         if "album_id" not in cols:    # migration: album identity (server album id, raw album-artist tag)
             self.conn.execute("ALTER TABLE tracks ADD COLUMN album_id TEXT")
@@ -135,6 +139,7 @@ class Database:
     def invalidate(self):
         with self._cache_lock:
             self._cache = {}
+            self.generation += 1                           # lets views that derive from the tracks know to rebuild
 
     def all_tracks(self, source=None):
         """Every track as a dict. The dicts are shared and cached until the next commit() (a 60k-track library

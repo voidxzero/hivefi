@@ -104,7 +104,6 @@ class Config:
     layouts: dict = field(default_factory=dict)       # name -> saved window layout (base64)
     browser_state: str = ""              # Genre | Artist | Album splitter
     resume_mode: str = "paused"          # off | paused | play: what to do with last session's queue on start
-    tracks_detached: bool = False        # the track list was popped out into its own panel
     check_updates: bool = True           # look for a newer version on GitHub at startup
     github_token: str = ""               # optional; needed to update from a private repo (else `gh auth token`)
 
