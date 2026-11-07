@@ -57,28 +57,41 @@ class UpNextPanel(QWidget):
 
     def __init__(self):
         super().__init__()
+        self.offset = 0
         self.list = QListWidget()
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.list.itemDoubleClicked.connect(lambda it: self.jumpRequested.emit(self.list.row(it)))
+        self.list.itemDoubleClicked.connect(lambda it: self.jumpRequested.emit(self.offset + self.list.row(it)))
         self.hint = QLabel("Double-click to jump · Delete removes"); self.hint.setStyleSheet("opacity:.6")
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.list); lay.addWidget(self.hint)
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key.Key_Delete:
-            self.removeRequested.emit([self.list.row(i) for i in self.list.selectedItems()])
+            self.removeRequested.emit([self.offset + self.list.row(i) for i in self.list.selectedItems()])
         else:
             super().keyPressEvent(e)
 
+    WINDOW_BEFORE, WINDOW_AFTER = 30, 570
+
     def refresh(self, queue, index):
+        """Show a window of the queue around the current track: a 60,000-track queue must not mean 60,000
+        list items rebuilt on every track change."""
+        self.offset = start = max(0, index - self.WINDOW_BEFORE)
+        end = min(len(queue), start + self.WINDOW_BEFORE + self.WINDOW_AFTER)
+        self.list.setUpdatesEnabled(False)
         self.list.clear()
-        for i, t in enumerate(queue):
+        for i in range(start, end):
+            t = queue[i]
             it = QListWidgetItem(f'{"▶ " if i == index else ""}{t["artist"]} – {t["title"]}   {fmt_time(t["duration"])}')
             if i == index:
                 f = it.font(); f.setBold(True); it.setFont(f)
             self.list.addItem(it)
-        if 0 <= index < self.list.count():
-            self.list.scrollToItem(self.list.item(index))
+        if len(queue) > end:
+            more = QListWidgetItem(f"… and {len(queue) - end} more"); more.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.list.addItem(more)
+        self.list.setUpdatesEnabled(True)
+        if 0 <= index - start < self.list.count():
+            self.list.scrollToItem(self.list.item(index - start))
 
 
 class LyricsPanel(QWidget):

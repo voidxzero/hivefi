@@ -1,15 +1,34 @@
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
+from PyQt6.QtCore import QThread, Qt, pyqtSignal
+from PyQt6.QtWidgets import (QListWidgetItem, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
                              QLabel, QLineEdit, QListWidget, QPushButton, QSpinBox, QTabWidget,
                              QVBoxLayout, QWidget, QComboBox)
 
 from ..subsonic import Subsonic, SubsonicError
 
 
+_RUNNING: set = set()
+
+
+class _Call(QThread):
+    """Run a blocking network call off the UI thread."""
+    done = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent); self.fn = fn
+
+    def run(self):
+        try:
+            self.done.emit(self.fn())
+        except Exception as e:  # noqa: BLE001 - shown in the dialog
+            self.failed.emit(str(e))
+
+
 class SettingsDialog(QDialog):
     def __init__(self, cfg, parent=None):
         super().__init__(parent)
         self.cfg = cfg
+        self._closed = False
         self.setWindowTitle("Preferences")
         self.resize(520, 420)
         tabs = QTabWidget()
@@ -44,10 +63,17 @@ class SettingsDialog(QDialog):
         self.bitrate.setCurrentIndex(max(0, self.bitrate.findData(cfg.max_bitrate)))
         self.status = QLabel("")
         test = QPushButton("Test connection"); test.clicked.connect(self._test)
+        self.server_libs = QListWidget(); self.server_libs.setMaximumHeight(90)
+        self.server_libs.setToolTip("Which of the server's libraries (music folders) to sync. All ticked = everything.")
+        self._fill_server_libs(cfg.server_folder_names)
+        load = QPushButton("Load libraries from server"); load.clicked.connect(self._load_libs)
+        self.libs_status = QLabel("")
         for lbl, w in (("Server URL", self.url), ("Username", self.user), ("Password", self.pw),
                        ("Sync every", self.interval), ("Streaming quality", self.bitrate)):
             f.addRow(lbl, w)
         f.addRow(self.enabled)
+        f.addRow("Libraries to sync", self.server_libs)
+        f.addRow(load, self.libs_status)
         f.addRow(self.on_start); f.addRow(self.scrobble); f.addRow(test, self.status)
         tabs.addTab(srv, "Navidrome / Subsonic")
 
@@ -87,13 +113,50 @@ class SettingsDialog(QDialog):
     def folders(self):
         return [self.dirs.item(i).text() for i in range(self.dirs.count())]
 
+    def _api(self):
+        return Subsonic(self.url.text().strip(), self.user.text().strip(), self.pw.text(), timeout=10)
+
+    def _async(self, fn, ok, fail):
+        t = _Call(fn)                                    # no parent: it may outlive the dialog
+        _RUNNING.add(t); t.finished.connect(lambda: _RUNNING.discard(t))
+        t.done.connect(lambda r: self._closed or ok(r))  # ignore results that arrive after the dialog closed
+        t.failed.connect(lambda e: self._closed or fail(e))
+        t.start()
+
+    def done(self, r):
+        self._closed = True
+        super().done(r)
+
     def _test(self):
-        self.status.setText("Testing…"); self.status.repaint()
-        try:
-            Subsonic(self.url.text(), self.user.text(), self.pw.text(), timeout=10).ping()
-            self.status.setText("✔ Connected")
-        except SubsonicError as e:
-            self.status.setText(f"✘ {e}")
+        self.status.setText("Testing…")
+        self._async(lambda: self._api().ping(), lambda _r: self.status.setText("✔ Connected"),
+                    lambda e: self.status.setText(f"✘ {e}"))
+
+    def _fill_server_libs(self, names: dict):
+        """names: id -> name. Ticked = synced; the stored selection [] means all."""
+        chosen = set(self.cfg.server_folders)
+        self.server_libs.clear()
+        for fid, name in names.items():
+            it = QListWidgetItem(name); it.setData(Qt.ItemDataRole.UserRole, fid)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Checked if not chosen or fid in chosen else Qt.CheckState.Unchecked)
+            self.server_libs.addItem(it)
+        self.server_libs.setEnabled(bool(names))
+
+    def _load_libs(self):
+        self.libs_status.setText("Loading…")
+        def ok(folders):
+            self.libs_status.setText(f"{len(folders)} librar{'y' if len(folders) == 1 else 'ies'}" if folders
+                                     else "The server reports no separate libraries")
+            self._fill_server_libs({f["id"]: f["name"] for f in folders})
+        self._async(lambda: self._api().music_folders(), ok, lambda e: self.libs_status.setText(f"✘ {e}"))
+
+    def chosen_server_folders(self):
+        """(ids to sync — [] means all —, id -> name of every known library)."""
+        items = [self.server_libs.item(i) for i in range(self.server_libs.count())]
+        names = {it.data(Qt.ItemDataRole.UserRole): it.text() for it in items}
+        ticked = [it.data(Qt.ItemDataRole.UserRole) for it in items if it.checkState() == Qt.CheckState.Checked]
+        return ([] if len(ticked) in (0, len(items)) else ticked), names
 
     def apply(self):
         c = self.cfg
@@ -103,6 +166,9 @@ class SettingsDialog(QDialog):
         c.sync_interval_min, c.sync_on_start = self.interval.value(), self.on_start.isChecked()
         c.scrobble, c.max_bitrate = self.scrobble.isChecked(), self.bitrate.currentData()
         c.show_tray, c.close_to_tray = self.tray.isChecked(), self.close_tray.isChecked()
+        c.server_folders, names = self.chosen_server_folders()
+        if names:
+            c.server_folder_names = names
         c.write_ratings = self.write_rt.isChecked()
         c.check_updates, c.github_token = self.updates.isChecked(), self.gh_token.text().strip()
         c.save()

@@ -68,3 +68,52 @@ def test_offline_ops_are_kept(env):
     dead = Subsonic("http://127.0.0.1:1", "u", "pw", timeout=1)
     assert sync.flush_ops(db, dead) == 0 and len(db.pending_ops()) == 1
     assert sync.flush_ops(db, api) == 1
+
+
+def _two_libraries(st):
+    st.folders = [{"id": "1", "name": "Music"}, {"id": "2", "name": "Audiobooks"}]
+    for s in st.songs:
+        s["folder"] = "1" if int(s["id"]) <= 4 else "2"
+
+
+def test_no_libraries_reported(env):
+    st, api, db = env
+    assert api.music_folders() == []                      # server without getMusicFolders
+    r = sync.full_sync(db, api)
+    assert r["folder_names"] == {} and len(db.all_tracks("remote")) == 7
+
+
+def test_choose_server_libraries(env):
+    st, api, db = env
+    _two_libraries(st)
+    assert api.music_folders() == [{"id": "1", "name": "Music"}, {"id": "2", "name": "Audiobooks"}]
+    r = sync.full_sync(db, api)                           # all libraries, each song stamped with its library
+    assert r["folder_names"] == {"1": "Music", "2": "Audiobooks"} and r["songs"] == 7
+    by = {t["remote_id"]: t["folder_id"] for t in db.all_tracks("remote")}
+    assert by["1"] == "1" and by["4"] == "1" and by["5"] == "2" and by["7"] == "2"
+    r = sync.full_sync(db, api)                           # nothing changed: nothing written
+    assert r["changed"] == 0 and r["removed"] == 0
+    st.calls.clear()
+    r = sync.full_sync(db, api, folders=["2"])            # only one library: the other one's songs go away
+    assert r["songs"] == 3 and r["removed"] == 4 and len(db.all_tracks("remote")) == 3
+    assert [c for c in st.calls if c[0] == "search3"] and all(c[1].get("musicFolderId") == ["2"]
+                                                              for c in st.calls if c[0] == "search3")
+    r = sync.full_sync(db, api, folders=["1", "2"])       # choose both again: everything is back
+    assert len(db.all_tracks("remote")) == 7 and r["changed"] == 4
+
+
+def test_unchanged_sync_writes_nothing(env):
+    st, api, db = env
+    sync.full_sync(db, api)
+    st.songs[0]["title"] = "Renamed"
+    r = sync.full_sync(db, api)
+    assert r["changed"] == 1 and db.track_by_remote("1")["title"] == "Renamed"
+
+
+def test_failed_sync_keeps_library(env):
+    st, api, db = env
+    sync.full_sync(db, api)
+    bad = Subsonic(api.base, "u", "wrong")
+    with pytest.raises(SubsonicError):
+        sync.pull_library(db, bad)
+    assert len(db.all_tracks("remote")) == 7

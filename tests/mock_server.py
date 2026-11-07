@@ -17,6 +17,7 @@ class State:
         self.playlists = {"p1": {"id": "p1", "name": "Server list", "songIds": ["1", "2"]}}
         self.calls = []
         self.next_pl = 2
+        self.folders = None              # e.g. [{'id': '1', 'name': 'Music'}, ...]: enables getMusicFolders
 
 
 def make_server(state: State):
@@ -39,9 +40,14 @@ def make_server(state: State):
                 return reply(status="failed", err={"code": 40, "message": "Wrong username or password"})
             state.calls.append((ep, {k: v for k, v in q.items() if k not in "utsvcf"}))
             if ep == "ping": return reply()
+            if ep == "getMusicFolders" and state.folders is not None:
+                return reply({"musicFolders": {"musicFolder": state.folders}})
             if ep == "search3":
                 off, n = int(one("songOffset", 0)), int(one("songCount", 20))
-                return reply({"searchResult3": {"song": state.songs[off:off + n]}})
+                songs = state.songs
+                if one("musicFolderId") is not None:
+                    songs = [s for s in songs if s.get("folder") == one("musicFolderId")]
+                return reply({"searchResult3": {"song": songs[off:off + n]}})
             if ep == "getPlaylists":
                 return reply({"playlists": {"playlist": [{"id": p["id"], "name": p["name"]}
                                                           for p in state.playlists.values()]}})

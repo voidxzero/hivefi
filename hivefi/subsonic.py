@@ -76,13 +76,35 @@ class Subsonic:
         return None
 
     # --- library ---
-    def iter_songs(self, page=500):
-        """Yield every song. Fast path: search3 with empty query (Navidrome/OpenSubsonic);
-        fall back to walking albums."""
+    def music_folders(self) -> list[dict]:
+        """The server's libraries (Subsonic 'music folders'): [{'id': '1', 'name': 'Music'}, ...]; [] if unsupported."""
+        try:
+            body = self.call("getMusicFolders")
+        except SubsonicError:
+            return []
+        return [{"id": str(f.get("id")), "name": f.get("name") or str(f.get("id"))}
+                for f in _aslist(body.get("musicFolders", {}).get("musicFolder")) if f.get("id") is not None]
+
+    def iter_songs_in(self, folders=None, page=500):
+        """Yield (folder_id, song) for the chosen libraries (None/[] = all of them)."""
+        ids = [str(f) for f in folders] if folders else [f["id"] for f in self.music_folders()]
+        if not folders and len(ids) <= 1:             # a single library: nothing to filter by
+            stamp = ids[0] if ids else None
+            for s in self.iter_songs(page):
+                yield stamp, s
+            return
+        for fid in ids:
+            for s in self.iter_songs(page, folder=fid):
+                yield fid, s
+
+    def iter_songs(self, page=500, folder=None):
+        """Yield every song (of one music folder if given). Fast path: search3 with empty query
+        (Navidrome/OpenSubsonic); fall back to walking albums."""
+        extra = {"musicFolderId": folder} if folder is not None else {}
         offset, got_any = 0, False
         while True:
             body = self.call("search3", query='""', artistCount=0, albumCount=0,
-                             songCount=page, songOffset=offset)
+                             songCount=page, songOffset=offset, **extra)
             songs = _aslist(body.get("searchResult3", {}).get("song"))
             if not songs:
                 break
@@ -96,7 +118,7 @@ class Subsonic:
         # fallback: albums
         offset = 0
         while True:
-            body = self.call("getAlbumList2", type="alphabeticalByName", size=page, offset=offset)
+            body = self.call("getAlbumList2", type="alphabeticalByName", size=page, offset=offset, **extra)
             albums = _aslist(body.get("albumList2", {}).get("album"))
             if not albums:
                 return

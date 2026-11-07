@@ -1,7 +1,7 @@
 """Cover-art grid of albums with lazy, threaded cover loading."""
-from PyQt6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
-from PyQt6.QtWidgets import QAbstractItemView, QListView, QListWidget, QListWidgetItem
+from PyQt6.QtWidgets import QAbstractItemView, QListView, QListWidget, QListWidgetItem, QToolTip
 
 from .. import art
 
@@ -44,6 +44,7 @@ class AlbumGrid(QListWidget):
         self.albums: dict[str, list] = {}
         self._gen = 0
         self._requested: set[str] = set()
+        self._items: dict[str, QListWidgetItem] = {}
         self.setViewMode(QListView.ViewMode.IconMode)
         self.setResizeMode(QListView.ResizeMode.Adjust)
         self.setMovement(QListView.Movement.Static)
@@ -68,20 +69,31 @@ class AlbumGrid(QListWidget):
         groups: dict[tuple, list] = {}
         for t in tracks:
             groups.setdefault(((t["album_artist"] or t["artist"]), t["album"]), []).append(t)
-        self.blockSignals(True); self.clear(); self.albums = {}
+        self.blockSignals(True); self.clear(); self.albums = {}; self._items = {}
         for (artist, album), ts in sorted(groups.items(), key=lambda kv: (kv[0][0].lower(), kv[0][1].lower())):
             key = f"{artist}\x00{album}"
-            ts.sort(key=lambda t: (t["disc_no"] or 1, t["track_no"] or 0, t["title"].lower()))
-            self.albums[key] = ts
+            self.albums[key] = ts                      # track order is sorted on demand (album_tracks)
             it = QListWidgetItem(self.placeholder, f"{album}\n{artist}")
-            it.setData(KEY, key); it.setToolTip(f"{album} — {artist}\n{len(ts)} tracks")
-            it.setSizeHint(QSize(ICON + 30, ICON + 52))
-            self.addItem(it)
+            it.setData(KEY, key)
+            self.addItem(it); self._items[key] = it
         self.blockSignals(False)
         self._timer.start()
 
     def album_tracks(self, it):
-        return list(self.albums.get(it.data(KEY), []))
+        ts = self.albums.get(it.data(KEY), [])
+        return sorted(ts, key=lambda t: (t["disc_no"] or 1, t["track_no"] or 0, t["title"].lower()))
+
+    def event(self, e):
+        if e.type() == QEvent.Type.ToolTip:               # built when shown, not for thousands of items up front
+            it = self.itemAt(e.pos())
+            ts = self.albums.get(it.data(KEY)) if it else None
+            if ts:
+                QToolTip.showText(e.globalPos(), f"{ts[0]['album']} — {ts[0]['album_artist'] or ts[0]['artist']}\n"
+                                                 f"{len(ts)} tracks", self)
+            else:
+                QToolTip.hideText()
+            return True
+        return super().event(e)
 
     def selected_album(self):
         it = self.currentItem()
@@ -105,11 +117,18 @@ class AlbumGrid(QListWidget):
     def _request_visible(self):
         if not self.isVisible():
             return
-        vr = self.viewport().rect().adjusted(0, -ICON, 0, ICON)
+        # items flow left-to-right in fixed cells: work out which rows are on screen instead of asking Qt about
+        # every one of thousands of items
+        gw, gh = self.gridSize().width(), self.gridSize().height()
+        vp = self.viewport().rect()
+        cols = max(1, vp.width() // gw)
+        top = self.verticalScrollBar().value()
+        first = max(0, (top - ICON) // gh) * cols
+        last = min(self.count(), ((top + vp.height() + ICON) // gh + 1) * cols)
         api = self.api_getter()
-        for i in range(self.count()):
+        for i in range(first, last):
             it = self.item(i); key = it.data(KEY)
-            if key in self._requested or not self.visualItemRect(it).intersects(vr):
+            if key in self._requested:
                 continue
             self._requested.add(key)
             ts = self.albums[key]
@@ -123,6 +142,6 @@ class AlbumGrid(QListWidget):
         if not pm.loadFromData(data):
             return
         pm = pm.scaled(ICON, ICON, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-        for i in range(self.count()):
-            if self.item(i).data(KEY) == key:
-                self.item(i).setIcon(QIcon(pm)); break
+        it = self._items.get(key)
+        if it is not None:
+            it.setIcon(QIcon(pm))

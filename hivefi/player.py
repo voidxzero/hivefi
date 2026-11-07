@@ -55,11 +55,13 @@ class Player(QObject):
         self.mp.engineChanged.connect(lambda _e: self._apply_volume())
 
     # --- settings
-    def configure(self):
-        """Re-read audio settings from the config (volume curve, ReplayGain for the Qt engine, engine DSP)."""
+    def configure(self, relook=True):
+        """Re-read audio settings from the config (volume curve, ReplayGain for the Qt engine, engine DSP).
+        relook=False skips re-evaluating the next track (equalizer drags call this dozens of times a second)."""
         self.mp.apply_settings()
         self._apply_volume()
-        self._update_next()
+        if relook:
+            self._update_next()
 
     # --- queue management
     @property

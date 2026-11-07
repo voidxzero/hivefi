@@ -90,6 +90,8 @@ class Config:
     show_tray: bool = True
     close_to_tray: bool = False
     write_ratings: bool = False          # also store star ratings in local files' tags
+    server_folders: list = field(default_factory=list)   # Subsonic music-folder ids to sync ([] = all libraries)
+    server_folder_names: dict = field(default_factory=dict)   # id -> name of the server's libraries (last seen)
     check_updates: bool = True           # look for a newer version on GitHub at startup
     github_token: str = ""               # optional; needed to update from a private repo (else `gh auth token`)
 
@@ -102,6 +104,17 @@ class Config:
         off = [k for k in self.libraries_off if k != key]
         self.libraries_off = off if on else off + [key]
 
+    @staticmethod
+    def server_lib_key(folder_id) -> str:
+        """libraries_off key of one library (music folder) on the server."""
+        return f"{Config.NAVIDROME}:{folder_id}"
+
+    def enabled_tracks(self, tracks) -> list:
+        """Tracks of the libraries that are switched on (a plain copy when nothing is switched off)."""
+        if not self.libraries_off:
+            return list(tracks)
+        return [t for t in tracks if self.track_enabled(t)]
+
     @property
     def server_enabled(self) -> bool:
         return self.server_configured and self.lib_enabled(self.NAVIDROME)
@@ -113,7 +126,10 @@ class Config:
     def track_enabled(self, t: dict) -> bool:
         """Is this track part of a library that is currently switched on?"""
         if t["source"] == "remote":
-            return self.lib_enabled(self.NAVIDROME)
+            if not self.lib_enabled(self.NAVIDROME):
+                return False
+            fid = t.get("folder_id")
+            return fid is None or self.lib_enabled(self.server_lib_key(fid))
         if not self.libraries_off:
             return True
         p = t.get("path") or ""

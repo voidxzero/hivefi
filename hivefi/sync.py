@@ -43,24 +43,28 @@ def flush_ops(db, api: Subsonic) -> int:
     return done
 
 
-def pull_library(db, api: Subsonic, progress=None) -> tuple[int, int]:
-    db.mark_unseen("remote")
-    n = 0
+def pull_library(db, api: Subsonic, progress=None, folders=None) -> tuple[int, int, int]:
+    """Fetch the server library. `folders` = Subsonic music-folder ids to pull (None/[] = everything).
+    Returns (songs seen, removed, changed): `changed` counts rows actually written, so callers can skip a refresh."""
+    db.begin_pass()
+    n = changed = 0
     try:
-        for s in api.iter_songs():
-            db.upsert_track("sub:" + s["id"], "remote", remote_id=s["id"], **song_to_fields(s))
+        for fid, s in api.iter_songs_in(folders):
+            changed += db.upsert_track("sub:" + s["id"], "remote", remote_id=s["id"], folder_id=fid,
+                                       **song_to_fields(s))
             n += 1
             if n % 500 == 0:
-                db.commit()
+                db.conn.commit()
                 if progress:
                     progress(f"Fetched {n} songs…")
     except SubsonicError:
-        db.conn.execute("UPDATE tracks SET seen=1 WHERE source='remote'")  # don't wipe on failure
+        db.abort_pass()                      # don't wipe the library when the server fails half-way
         db.commit()
         raise
-    removed = db.delete_unseen("remote")
+    removed = db.end_pass("remote")          # anything not re-seen is gone (or belongs to a library no longer chosen)
     db.commit()
-    return n, removed
+    db.all_tracks()                          # rebuild the track cache here, in the worker, not on the UI thread
+    return n, removed, changed
 
 
 def sync_playlists(db, api: Subsonic):
@@ -92,6 +96,8 @@ def sync_playlists(db, api: Subsonic):
         if lp:
             pid = lp["id"]
             db.conn.execute("UPDATE playlists SET name=? WHERE id=?", (rp["name"], pid))
+            if [t["id"] for t in db.playlist_tracks(pid)] == ids:       # unchanged: don't rewrite it
+                continue
         else:
             pid = db.create_playlist(rp["name"], remote_id=rid, sync=1)
         db.set_playlist_tracks(pid, ids, mark_dirty=False)
@@ -102,15 +108,17 @@ def sync_playlists(db, api: Subsonic):
     db.commit()
 
 
-def full_sync(db, api: Subsonic, progress=None) -> dict:
+def full_sync(db, api: Subsonic, progress=None, folders=None) -> dict:
     say = progress or (lambda m: None)
     say("Connecting…")
     api.ping()
     say("Sending pending changes…")
     sent = flush_ops(db, api)
+    names = {f["id"]: f["name"] for f in api.music_folders()}
     say("Fetching library…")
-    added, removed = pull_library(db, api, say)
+    added, removed, changed = pull_library(db, api, say, folders)
     say("Syncing playlists…")
     sync_playlists(db, api)
     db.set_meta("last_sync", time.time())
-    return {"songs": added, "removed": removed, "sent_ops": sent}
+    return {"songs": added, "removed": removed, "sent_ops": sent, "changed": changed,
+            "folder_names": names}

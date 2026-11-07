@@ -73,3 +73,15 @@ def test_legacy_folder_migration(tmp_path, monkeypatch):
     assert config.config_dir() == tmp_path / "hivefi" and not old.exists()
     c = config.Config.load()
     assert c.server_url == "http://x" and c.skin == "Classic"
+
+
+def test_server_library_visibility():
+    from hivefi.config import Config
+    c = Config(); c.server_url, c.username = "http://x", "u"
+    t = {"source": "remote", "folder_id": "2", "path": None}
+    assert c.track_enabled(t) and c.track_enabled({**t, "folder_id": None})
+    c.set_lib_enabled(c.server_lib_key("2"), False)
+    assert not c.track_enabled(t) and c.track_enabled({**t, "folder_id": "1"})
+    assert c.enabled_tracks([t, {**t, "folder_id": "1"}]) == [{**t, "folder_id": "1"}]
+    c.set_lib_enabled(c.NAVIDROME, False)
+    assert not c.track_enabled({**t, "folder_id": "1"})

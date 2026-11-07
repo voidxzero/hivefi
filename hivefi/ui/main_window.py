@@ -27,7 +27,7 @@ from .duplicates_dialog import DuplicatesDialog
 from .tools_dialogs import ConvertDialog, MissingDialog, OrganizeDialog, ReplayGainDialog
 from .equalizer import EqualizerPanel
 from .mini import MiniPlayer
-from .models import COLUMNS, DEFAULT_HIDDEN, MIME, TrackModel, TrackProxy, fmt_time
+from .models import COLUMNS, DEFAULT_HIDDEN, MIME, TrackModel, fmt_time
 from .panels import LyricsPanel, NowPlayingPanel, TrackInfoPanel, UpNextPanel
 from .smart_dialog import SmartDialog
 from .settings_dialog import SettingsDialog
@@ -96,6 +96,7 @@ class MainWindow(QMainWindow):
         self.skin_tokens = skins.all_skins().get(cfg.skin) or skins.BUILTIN[skins.DEFAULT]
         self._quitting = False
         self.restart_requested = False
+        self._closing = False
         self.source = ("all", None)
         self._workers: set[Worker] = set()
         self._sync_worker = self._scan_worker = self._flush_worker = None
@@ -125,8 +126,11 @@ class MainWindow(QMainWindow):
         self.sync_timer = QTimer(self, timeout=lambda: self.sync_now(silent=True))
         self._apply_sync_timer()
         self.refresh_playlists()
-        self.load_source()
-        QTimer.singleShot(500, self._startup)
+        self.status_lbl.setText("Loading library…")
+        w = Worker(lambda _p: len(self.db.all_tracks()), self)       # fill the track cache off the UI thread
+        w.done.connect(lambda _n: (self.load_source(), self._startup()))
+        w.failed.connect(lambda _e: (self.load_source(), self._startup()))
+        self._run(w)
 
     # ------------------------------------------------------------ setup
     def _rebuild_api(self):
@@ -142,7 +146,7 @@ class MainWindow(QMainWindow):
 
     # tracks from libraries that are switched off never show up anywhere
     def _tracks(self, source=None):
-        return [t for t in self.db.all_tracks(source) if self.cfg.track_enabled(t)]
+        return self.cfg.enabled_tracks(self.db.all_tracks(source))
 
     def _playlist_tracks(self, pid):
         return [t for t in self.db.playlist_tracks(pid) if self.cfg.track_enabled(t)]
@@ -178,7 +182,9 @@ class MainWindow(QMainWindow):
         tb.addWidget(vol_icon); tb.addWidget(self.vol)
         tb.addSeparator()
         self.search = QLineEdit(); self.search.setPlaceholderText("Search…"); self.search.setClearButtonEnabled(True)
-        self.search.setFixedWidth(220); self.search.textChanged.connect(self._on_search)
+        self.search.setFixedWidth(220); self.search.textChanged.connect(lambda _t: self._search_timer.start())
+        self._search_timer = QTimer(self, singleShot=True, interval=180,
+                                    timeout=lambda: self._on_search(self.search.text()))
         tb.addWidget(self.search)
 
         # view mode buttons
@@ -200,7 +206,7 @@ class MainWindow(QMainWindow):
         self.lists = {}
         browser = QSplitter(Qt.Orientation.Horizontal)
         for name in ("genre", "artist", "album"):
-            lw = QListWidget(); lw.setObjectName(name)
+            lw = QListWidget(); lw.setObjectName(name); lw.setUniformItemSizes(True)
             lw.currentRowChanged.connect(lambda _r, n=name: self._on_browser(n))
             self.lists[name] = lw; browser.addWidget(lw)
 
@@ -212,15 +218,17 @@ class MainWindow(QMainWindow):
         self.top_stack = QStackedWidget(); self.top_stack.addWidget(browser); self.top_stack.addWidget(self.grid)
 
         # track table
-        self.model = TrackModel(); self.proxy = TrackProxy(); self.proxy.setSourceModel(self.model)
-        self.table = QTableView(); self.table.setModel(self.proxy)
-        self.table.setSortingEnabled(True); self.table.setAlternatingRowColors(True)
+        self.model = TrackModel()
+        self.table = QTableView(); self.table.setModel(self.model)
+        self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.verticalHeader().hide(); self.table.verticalHeader().setDefaultSectionSize(22)
         self.table.setShowGrid(False)
         hh = self.table.horizontalHeader()
         hh.setStretchLastSection(True); hh.setSectionsMovable(True)
+        hh.setSectionsClickable(True); hh.setSortIndicatorShown(True)
+        hh.sectionClicked.connect(self._header_sort)             # sorting is done by the model, not Qt
         hh.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         hh.customContextMenuRequested.connect(self._header_menu)
         for i, (_, key, w) in enumerate(COLUMNS):
@@ -360,6 +368,14 @@ class MainWindow(QMainWindow):
             if not self.cfg.server_enabled:
                 nav.setForeground(0, self.palette().placeholderText())
             self._items[("remote", None)] = nav
+            names = self.cfg.server_folder_names
+            if len(names) > 1:                                    # several libraries on the server: list each
+                for fid, name in names.items():
+                    on = self.cfg.server_enabled and self.cfg.lib_enabled(Config.server_lib_key(fid))
+                    child = item(nav, name if on else f"{name} (off)", ("remote", fid))
+                    if not on:
+                        child.setForeground(0, self.palette().placeholderText())
+                    self._items[("remote", fid)] = child
         self._items[("queue", None)] = item(self.tree, "Now Playing", ("queue", None))
         pls = item(self.tree, "Playlists", None)
         for p in self.db.playlists():
@@ -384,80 +400,116 @@ class MainWindow(QMainWindow):
         if d:
             self.source = tuple(d); self.load_source()
 
-    def load_source(self):
+    def load_source(self, keep=False):
+        """Reload the track list of the current source. keep=True preserves the Genre/Artist/Album selection."""
         kind, arg = self.source
         if kind == "all": tracks = self._tracks()
+        elif kind == "remote" and arg is not None:
+            tracks = [t for t in self._tracks("remote") if t.get("folder_id") == arg]
         elif kind in ("local", "remote"): tracks = self._tracks(kind)
         elif kind == "queue": tracks = list(self.player.queue)
         elif kind == "smart": tracks = smart.evaluate(self._tracks(), self._smart_spec(arg))
         else: tracks = self._playlist_tracks(arg)
-        self.proxy.set_filters(genre=None, artist=None, album=None)
-        self.model.set_tracks(tracks)
-        keep_order = kind in ("queue", "playlist", "smart")
-        self.table.setSortingEnabled(not keep_order)
-        if keep_order:
-            self.proxy.sort(-1)
-        elif self.table.horizontalHeader().sortIndicatorSection() in (0, 1) or not self._sorted_once:
-            self.table.sortByColumn(3, Qt.SortOrder.AscendingOrder); self._sorted_once = True
+        m = self.model
+        saved = (m.genre, m.artist, m.album) if keep else (None, None, None)
+        m.genre = m.artist = m.album = None
+        hh = self.table.horizontalHeader()
+        if kind in ("queue", "playlist", "smart"):               # these keep their own order
+            hh.setSortIndicatorShown(False)
+            m.set_tracks(tracks, sort_col=None)
+        else:
+            sec, order = hh.sortIndicatorSection(), hh.sortIndicatorOrder()
+            if sec in (0, 1) or not self._sorted_once:
+                sec, order = 3, Qt.SortOrder.AscendingOrder
+                hh.setSortIndicator(sec, order); self._sorted_once = True
+            hh.setSortIndicatorShown(True)
+            m.set_tracks(tracks, sort_col=COLUMNS[sec][1], sort_desc=order == Qt.SortOrder.DescendingOrder)
         cur = self.player.current
-        self.model.set_playing(cur["id"] if cur else None)
+        m.playing_id = cur["id"] if cur else None
         self._fill_browser("genre")
+        if any(saved):
+            self._restore_browser(saved)
         self._refresh_grid()
         self._update_status()
         self._sel_changed()
 
+    def _header_sort(self, section):
+        if self.source[0] in ("queue", "playlist", "smart") or section in (0,):
+            return
+        hh = self.table.horizontalHeader()
+        desc = hh.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder if hh.sortIndicatorSection() == section else False
+        order = Qt.SortOrder.DescendingOrder if desc else Qt.SortOrder.AscendingOrder
+        hh.setSortIndicator(section, order)
+        self.model.sort_by(COLUMNS[section][1], desc)
+        self._update_status()
+
     def _fill_browser(self, level):
         order = ["genre", "artist", "album"]
         for lv in order[order.index(level):]:
-            lw = self.lists[lv]; lw.blockSignals(True); lw.clear()
-            ignore = {"genre": ("genre", "artist", "album"), "artist": ("artist", "album"), "album": ("album",)}[lv]
-            vals = set()
-            for t in self.model.tracks:
-                if self.proxy.matches(t, ignore=ignore):
-                    v = {"genre": t["genre"], "artist": t["album_artist"] or t["artist"], "album": t["album"]}[lv]
-                    if v: vals.add(v)
+            lw = self.lists[lv]; lw.blockSignals(True); lw.setUpdatesEnabled(False); lw.clear()
+            rows = self.model.narrowed(lv)
+            if lv == "genre": vals = {t["genre"] for t in rows}
+            elif lv == "artist": vals = {t["album_artist"] or t["artist"] for t in rows}
+            else: vals = {t["album"] for t in rows}
+            vals.discard("")
             lw.addItem(f"{ALL} ({len(vals)})")
-            lw.addItems(sorted(vals, key=str.lower)); lw.setCurrentRow(0); lw.blockSignals(False)
+            lw.addItems(sorted(vals, key=str.lower)); lw.setCurrentRow(0)
+            lw.setUpdatesEnabled(True); lw.blockSignals(False)
+
+    def _restore_browser(self, saved):
+        """Re-select the Genre/Artist/Album that were chosen before a reload, where they still exist."""
+        order = ["genre", "artist", "album"]
+        for i, (lv, val) in enumerate(zip(order, saved)):
+            if not val:
+                break
+            items = self.lists[lv].findItems(val, Qt.MatchFlag.MatchExactly)
+            if not items:
+                break
+            self.lists[lv].blockSignals(True); self.lists[lv].setCurrentItem(items[0]); self.lists[lv].blockSignals(False)
+            self.model.set_filters(**{lv: val})
+            if i < 2:
+                self._fill_browser(order[i + 1])
 
     def _on_browser(self, name):
         lw = self.lists[name]
         v = lw.currentItem().text() if lw.currentRow() > 0 else None
-        self.proxy.set_filters(**{name: v})
         order = ["genre", "artist", "album"]
         nxt = order.index(name) + 1
-        for lv in order[nxt:]:
-            self.proxy.set_filters(**{lv: None})
+        below = {lv: None for lv in order[nxt:]}
+        self.model.set_filters(**{name: v}, **below)
         if nxt < 3:
             self._fill_browser(order[nxt])
         self._update_status()
 
     def _on_search(self, text):
-        self.proxy.set_filters(text=text)
+        self.model.set_filters(text=text, genre=None, artist=None, album=None)
         self._fill_browser("genre")
-        self.proxy.set_filters(genre=None, artist=None, album=None)
-        self._refresh_grid()
+        if self.cfg.view_mode == "albums":                       # thousands of album tiles: rebuild after typing settles
+            if not hasattr(self, "_grid_timer"):
+                self._grid_timer = QTimer(self, singleShot=True, interval=150, timeout=self._refresh_grid)
+            self._grid_timer.start()
         self._update_status()
 
     def _update_status(self):
-        n = self.proxy.rowCount()
-        dur = sum(self.proxy.sourceModel().tracks[self.proxy.mapToSource(self.proxy.index(r, 0)).row()]["duration"]
-                  for r in range(n))
-        self.status_lbl.setText(f"{n} tracks · {fmt_time(dur)}")
+        rows = self.model.tracks
+        self.status_lbl.setText(f"{len(rows)} tracks · {fmt_time(sum(t['duration'] or 0 for t in rows))}")
 
     # ------------------------------------------------------- playback UI
     def _visible_tracks(self):
-        return [self.model.tracks[self.proxy.mapToSource(self.proxy.index(r, 0)).row()]
-                for r in range(self.proxy.rowCount())]
+        return list(self.model.tracks)
 
     def _selected(self):
-        rows = sorted({self.proxy.mapToSource(i).row() for i in self.table.selectionModel().selectedRows()})
-        return [self.model.tracks[r] for r in rows]
+        rows = set()
+        for r in self.table.selectionModel().selection():       # ranges, not one QModelIndex per row
+            rows.update(range(r.top(), r.bottom() + 1))
+        tr = self.model.tracks
+        return [tr[i] for i in sorted(rows) if i < len(tr)]
 
     def _on_double(self, idx):
         if COLUMNS[idx.column()][1] == "rating":
             return
         if self.source[0] == "queue":
-            self.player.jump(self.proxy.mapToSource(idx).row()); return
+            self.player.jump(idx.row()); return
         self.player.play_list(self._visible_tracks(), idx.row())
 
     def _play_selected(self):
@@ -505,8 +557,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------ plays / ratings / stars
     def _on_played(self, t):
         self.db.bump_play(t["id"])
-        self.model.update_track(t["id"], play_count=(t.get("play_count") or 0) + 1)
-        t["play_count"] = (t.get("play_count") or 0) + 1
+        fresh = self.db.track(t["id"]) or {}
+        t["play_count"] = fresh.get("play_count", 0)
+        self.model.update_track(t["id"], play_count=t["play_count"], last_played=fresh.get("last_played", 0))
         if t["source"] == "remote" and self.cfg.scrobble and self.api:
             self.db.queue_op("scrobble", {"id": t["remote_id"], "time_ms": int(time.time() * 1000)})
             self._kick_flush()
@@ -517,12 +570,19 @@ class MainWindow(QMainWindow):
             w = Worker(lambda _p: api.scrobble(t["remote_id"], submission=False), self)
             self._run(w)
 
+    def _model_refresh(self, tracks, **fields):
+        if len(tracks) > 400:                                    # big batch: one repaint instead of one per row
+            for t in tracks: t.update(fields)
+            if self.model.tracks:
+                self.model.dataChanged.emit(self.model.index(0, 0),
+                                            self.model.index(len(self.model.tracks) - 1, len(COLUMNS) - 1))
+        else:
+            for t in tracks: self.model.update_track(t["id"], **fields)
+
     def set_rating(self, tracks, r):
-        for t in tracks:
-            self.db.set_rating(t["id"], r); t["rating"] = r
-            self.model.update_track(t["id"], rating=r)
-            if t["source"] == "remote":
-                self.db.queue_op("rating", {"id": t["remote_id"], "rating": r})
+        self.db.set_ratings([t["id"] for t in tracks], r)
+        self._model_refresh(tracks, rating=r)
+        self.db.queue_ops("rating", [{"id": t["remote_id"], "rating": r} for t in tracks if t["source"] == "remote"])
         paths = [t["path"] for t in tracks if t["source"] == "local" and t.get("path")]
         if self.cfg.write_ratings and paths:
             def write(_p):
@@ -537,11 +597,9 @@ class MainWindow(QMainWindow):
         self._kick_flush()
 
     def set_star(self, tracks, on):
-        for t in tracks:
-            self.db.set_starred(t["id"], on); t["starred"] = int(on)
-            self.model.update_track(t["id"], starred=int(on))
-            if t["source"] == "remote":
-                self.db.queue_op("star", {"id": t["remote_id"], "on": on})
+        self.db.set_starred_many([t["id"] for t in tracks], on)
+        self._model_refresh(tracks, starred=int(on))
+        self.db.queue_ops("star", [{"id": t["remote_id"], "on": on} for t in tracks if t["source"] == "remote"])
         self._kick_flush()
 
     # ------------------------------------------------------- menus
@@ -592,6 +650,10 @@ class MainWindow(QMainWindow):
         elif d and d == ("remote", None):
             m.addAction("Turn Navidrome off" if self.cfg.server_enabled else "Turn Navidrome on",
                         lambda: self.set_library_enabled(Config.NAVIDROME, not self.cfg.server_enabled))
+        elif d and d[0] == "remote" and d[1] is not None:
+            key = Config.server_lib_key(d[1]); on = self.cfg.lib_enabled(key)
+            m.addAction("Turn this library off" if on else "Turn this library on",
+                        lambda: self.set_library_enabled(key, not on))
         elif d and d == ("local", None):
             for folder in self.cfg.library_dirs:
                 a = m.addAction(folder); a.setCheckable(True); a.setChecked(self.cfg.lib_enabled(folder))
@@ -664,7 +726,10 @@ class MainWindow(QMainWindow):
         self.player.configure()
 
     def _on_eq_changed(self):
-        self.player.configure()
+        if not hasattr(self, "_eq_timer"):                     # coalesce slider drags into one engine update
+            self._eq_timer = QTimer(self, singleShot=True, interval=40,
+                                    timeout=lambda: self.player.configure(relook=False))
+        self._eq_timer.start()
 
     def _engine_changed(self, e):
         self.eq_panel.set_status("Audio engine: GStreamer" if e == "gst" else
@@ -679,6 +744,12 @@ class MainWindow(QMainWindow):
         if self.cfg.server_configured:
             a = m.addAction("Navidrome / Subsonic server"); a.setCheckable(True); a.setChecked(self.cfg.server_enabled)
             a.toggled.connect(lambda on: self.set_library_enabled(Config.NAVIDROME, on))
+        if self.cfg.server_configured and len(self.cfg.server_folder_names) > 1:
+            for fid, name in self.cfg.server_folder_names.items():
+                key = Config.server_lib_key(fid)
+                a = m.addAction(f"    {name}  (Navidrome)"); a.setCheckable(True); a.setChecked(self.cfg.lib_enabled(key))
+                a.setEnabled(self.cfg.server_enabled)
+                a.toggled.connect(lambda on, k=key: self.set_library_enabled(k, on))
         for folder in self.cfg.library_dirs:
             a = m.addAction(folder); a.setCheckable(True); a.setChecked(self.cfg.lib_enabled(folder))
             a.toggled.connect(lambda on, f=folder: self.set_library_enabled(f, on))
@@ -703,14 +774,17 @@ class MainWindow(QMainWindow):
 
     def _library_toggled(self, key, on):
         self.cfg.save()
-        self._rebuild_api(); self._apply_sync_timer()
+        server_part = key.startswith(Config.NAVIDROME + ":")         # one library of the server: view-only switch
+        if not server_part:
+            self._rebuild_api(); self._apply_sync_timer()
         self._after_library_change()
         if key == Config.NAVIDROME and on and self.api:
             self.sync_now(silent=True)            # catch up on whatever changed while it was off
-        elif key != Config.NAVIDROME and on:
+        elif key != Config.NAVIDROME and not server_part and on:
             self.scan_library(quiet=True)         # pick up files added while the folder was off
         state = "on" if on else "off"
-        name = "Navidrome" if key == Config.NAVIDROME else key
+        name = ("Navidrome" if key == Config.NAVIDROME else
+                self.cfg.server_folder_names.get(key.split(":", 1)[1], key) if server_part else key)
         self.statusBar().showMessage(f"Library {name} turned {state}", 5000)
 
     def _find_duplicates(self):
@@ -861,18 +935,17 @@ class MainWindow(QMainWindow):
             top = int(total * (0.5 if mode == "albums" else 0.25))
             self.main_split.setSizes([top, total - top])
         if not initial:
-            self.proxy.set_filters(genre=None, artist=None, album=None)
+            self.model.set_filters(genre=None, artist=None, album=None)
             self._fill_browser("genre"); self._refresh_grid(); self._update_status()
         else:
             self._refresh_grid()
 
     def _refresh_grid(self):
         if self.cfg.view_mode != "albums": return
-        self.grid.set_tracks([t for t in self.model.tracks
-                              if self.proxy.matches(t, ignore=("genre", "artist", "album"))])
+        self.grid.set_tracks(self.model.base())
 
     def _on_grid_album(self, artist, album):
-        self.proxy.set_filters(genre=None, artist=artist, album=album); self._update_status()
+        self.model.set_filters(genre=None, artist=artist, album=album); self._update_status()
 
     def _grid_menu(self, tracks, gpos):
         m = QMenu(self)
@@ -896,7 +969,7 @@ class MainWindow(QMainWindow):
     def _on_table_click(self, idx):
         """Click on the stars in the Rating column to rate (click the current rating again to clear)."""
         if COLUMNS[idx.column()][1] != "rating": return
-        t = self.model.tracks[self.proxy.mapToSource(idx).row()]
+        t = self.model.tracks[idx.row()]
         x = self.table.viewport().mapFromGlobal(QCursor.pos()).x() - self.table.columnViewportPosition(idx.column())
         sw = max(8, self.table.fontMetrics().horizontalAdvance("★"))
         star = 0 if x < 3 else min(5, (x - 3) // sw + 1)
@@ -1140,11 +1213,13 @@ class MainWindow(QMainWindow):
             return
         db = self.db
         skip = list(self.cfg.disabled_dirs)
-        w = Worker(lambda prog: scanner.scan(db, dirs, lambda i, n: prog(f"Scanning {i}/{n}"), skip=skip), self)
+        w = Worker(lambda prog: scanner.scan(db, dirs, lambda i, n: prog(f"Scanning {i}/{n}"), skip=skip,
+                                             cancelled=lambda: self._closing), self)
         w.progress.connect(lambda m: self.sync_lbl.setText(m))
         def done(res):
             self.sync_lbl.setText(f"Library: {res[0]} updated, {res[1]} removed")
-            self.load_source()
+            if res[0] or res[1]:                                 # nothing changed: leave the views alone
+                self.load_source(keep=True)
         w.done.connect(done)
         w.failed.connect(lambda e: self.sync_lbl.setText(f"Scan failed: {e}"))
         self._scan_worker = w; self._run(w)
@@ -1160,11 +1235,16 @@ class MainWindow(QMainWindow):
             return
         if self._sync_worker and self._sync_worker.isRunning(): return
         api, db = self.api, self.db
-        w = Worker(lambda prog: sync.full_sync(db, api, prog), self)
+        folders = list(self.cfg.server_folders)
+        w = Worker(lambda prog: sync.full_sync(db, api, prog, folders), self)
         w.progress.connect(lambda m: self.sync_lbl.setText("☁ " + m))
         def done(r):
             self.sync_lbl.setText(f"☁ Synced {time.strftime('%H:%M')} · {r['songs']} songs")
-            self.refresh_playlists(); self.load_source()
+            if r.get("folder_names") and r["folder_names"] != self.cfg.server_folder_names:
+                self.cfg.server_folder_names = r["folder_names"]; self.cfg.save()
+            self.refresh_playlists()
+            if r["changed"] or r["removed"] or self.source[0] == "playlist":
+                self.load_source(keep=True)
         def failed(e):
             self.sync_lbl.setText(f"☁ Sync failed: {e}")
             if not silent: QMessageBox.warning(self, "Sync failed", e)
@@ -1188,6 +1268,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e):
         if self.cfg.close_to_tray and self.tray and self.tray.isVisible() and not self._quitting:
             self.hide(); e.ignore(); return
+        self._closing = True                                     # lets a running scan stop early
         self.cfg.geometry = bytes(self.saveGeometry().toBase64()).decode()
         self.cfg.state = bytes(self.saveState().toBase64()).decode()
         self.cfg.header_state = bytes(self.table.horizontalHeader().saveState().toBase64()).decode()

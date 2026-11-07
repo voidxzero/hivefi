@@ -44,7 +44,7 @@ def test_everything(win):
     # views, panels
     w._set_view_mode("albums"); wait(300)
     assert w.grid.count() == 3
-    w.grid.setCurrentRow(0); assert w.proxy.rowCount() > 0
+    w.grid.setCurrentRow(0); assert w.model.rowCount() > 0
     w._set_view_mode("browser")
     for d in (w.dock_next, w.dock_lyrics, w.dock_info): d.show()
     w.player.play_list(db.all_tracks("local"), 0); wait(400)

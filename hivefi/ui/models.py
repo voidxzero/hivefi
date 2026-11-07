@@ -1,7 +1,7 @@
 import json
 import time
 
-from PyQt6.QtCore import QAbstractTableModel, QMimeData, QModelIndex, Qt, QSortFilterProxyModel
+from PyQt6.QtCore import QAbstractTableModel, QMimeData, QModelIndex, Qt
 from PyQt6.QtGui import QBrush, QColor
 
 MIME = "application/x-hivefi-tracks"
@@ -24,30 +24,148 @@ def fmt_time(sec):
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
+_FLAGS = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsDragEnabled
+
+
+def _sort_key(col_key, playing_id):
+    """Key function for sorting track dicts by a column (artist/album keep albums in track order)."""
+    if col_key in ("artist", "album"):
+        return lambda t: ((t[col_key] or "").lower(), (t["album"] or "").lower(), t["disc_no"] or 0, t["track_no"] or 0)
+    if col_key == "_state":
+        return lambda t: t["id"] == playing_id
+    return lambda t: (lambda v: v.lower() if isinstance(v, str) else (v or 0))(t.get(col_key))
+
+
 class TrackModel(QAbstractTableModel):
+    """All tracks of the current source (`all`, kept in sort order) and the rows currently shown (`tracks`).
+
+    Sorting and the Genre/Artist/Album/search filters are plain Python list operations on the whole library
+    (a handful of milliseconds even for 100k tracks) instead of a QSortFilterProxyModel, whose per-row Python
+    callbacks made every sort or keystroke take seconds."""
     playing_color = "#4fc3f7"
 
     def __init__(self):
         super().__init__()
-        self.tracks: list[dict] = []
+        self.all: list[dict] = []
+        self.tracks: list[dict] = []          # rows shown
         self.playing_id = None
+        self.text = ""
+        self.genre = self.artist = self.album = None
+        self.sort_col: str | None = None
+        self.sort_desc = False
+        self._rows: dict | None = None        # track id -> row, built lazily
+        self._base: list[dict] | None = None  # `all` narrowed by the search text only
+        self._base_prev: list[dict] | None = None   # last non-empty search result (starting point for longer text)
+        self._base_words: list[str] | None = None
 
-    def set_tracks(self, tracks):
-        self.beginResetModel(); self.tracks = tracks; self.endResetModel()
+    # ---- content
+    def set_tracks(self, tracks, sort_col="__keep__", sort_desc=None):
+        self.all = tracks
+        self._base = self._base_prev = self._base_words = None
+        if sort_col != "__keep__":
+            self.sort_col = sort_col
+        if sort_desc is not None:
+            self.sort_desc = sort_desc
+        self._resort_all()
+        self._refilter()
+
+    def _resort_all(self):
+        if self.sort_col:
+            self.all.sort(key=_sort_key(self.sort_col, self.playing_id), reverse=self.sort_desc)
+            self._base = self._base_prev = self._base_words = None
+
+    def sort_by(self, col_key, desc=False):
+        self.sort_col, self.sort_desc = col_key, desc
+        self._resort_all(); self._refilter()
+
+    # ---- filters
+    @staticmethod
+    def _prime(rows):
+        """Give every track its lowercase search string (once; the dicts are shared with the library cache)."""
+        for t in rows:
+            if "_hay" not in t:
+                t["_hay"] = f'{t["title"]} {t["artist"]} {t["album"]} {t["genre"]}'.lower()
+
+    def base(self):
+        """`all` narrowed by the search text. Typing more characters narrows the previous result instead of
+        rescanning the whole library."""
+        if self._base is None:
+            words = self.text.split()
+            if not words:
+                self._base = self.all
+            else:
+                src = self.all
+                prev = self._base_words
+                if self._base_prev is not None and prev and all(any(o in n for n in words) for o in prev):
+                    src = self._base_prev                      # new matches are a subset of the old ones
+                self._prime(src)
+                rows = src
+                for w in words:
+                    rows = [t for t in rows if w in t["_hay"]]
+                self._base = rows
+                self._base_prev, self._base_words = rows, words
+        return self._base
+
+    def set_filters(self, text=None, genre="keep", artist="keep", album="keep"):
+        if text is not None and text.lower() != self.text:
+            self.text = text.lower(); self._base = None
+            if not self.text.split():
+                self._base_prev, self._base_words = None, None
+        if genre != "keep": self.genre = genre
+        if artist != "keep": self.artist = artist
+        if album != "keep": self.album = album
+        self._refilter()
+
+    @staticmethod
+    def artist_of(t):
+        return t["album_artist"] or t["artist"]
+
+    def narrowed(self, upto="album"):
+        """Base list narrowed by the browser filters above `upto` ('genre' = none, 'artist' = genre, 'album' = both)."""
+        rows = self.base()
+        if upto != "genre" and self.genre:
+            g = self.genre
+            rows = [t for t in rows if t["genre"] == g]
+        if upto == "album" and self.artist:
+            a = self.artist
+            rows = [t for t in rows if (t["album_artist"] or t["artist"]) == a]
+        return rows
+
+    def _refilter(self):
+        rows = self.narrowed("album")
+        if self.album:
+            al = self.album
+            rows = [t for t in rows if t["album"] == al]
+        self.beginResetModel()
+        self.tracks = rows if rows is not self.all else list(rows)
+        self._rows = None
+        self.endResetModel()
+
+    # ---- point updates
+    def row_of(self, tid):
+        if self._rows is None:
+            self._rows = {t["id"]: r for r, t in enumerate(self.tracks)}
+        return self._rows.get(tid)
 
     def set_playing(self, tid):
-        self.playing_id = tid
-        if self.tracks:
-            self.dataChanged.emit(self.index(0, 0), self.index(len(self.tracks) - 1, 0))
-
-    def update_track(self, tid, **fields):
-        for r, t in enumerate(self.tracks):
-            if t["id"] == tid:
-                t.update(fields)
+        old, self.playing_id = self.playing_id, tid
+        for x in (old, tid):
+            r = self.row_of(x) if x is not None else None
+            if r is not None:
                 self.dataChanged.emit(self.index(r, 0), self.index(r, len(COLUMNS) - 1))
 
+    def update_track(self, tid, **fields):
+        r = self.row_of(tid)
+        if r is None:
+            return
+        self.tracks[r].update(fields)
+        if any(k in fields for k in ("title", "artist", "album", "genre")):
+            self.tracks[r].pop("_hay", None)
+        self.dataChanged.emit(self.index(r, 0), self.index(r, len(COLUMNS) - 1))
+
+    # ---- Qt model interface
     def flags(self, idx):
-        return super().flags(idx) | Qt.ItemFlag.ItemIsDragEnabled
+        return _FLAGS                    # called once per cell (select-all = hundreds of thousands of calls)
 
     def mimeTypes(self): return [MIME]
 
@@ -78,49 +196,7 @@ class TrackModel(QAbstractTableModel):
                 return time.strftime("%Y-%m-%d", time.localtime(v)) if v else ""
             if key == "source": return "Navidrome" if v == "remote" else "Local"
             return v
-        if role == Qt.ItemDataRole.UserRole:      # sort key
-            v = t.get(key)
-            if key == "_state": return t["id"] == self.playing_id
-            return v.lower() if isinstance(v, str) else (v or 0)
         if role == Qt.ItemDataRole.ForegroundRole and t["id"] == self.playing_id:
             return QBrush(QColor(self.playing_color))
         if role == Qt.ItemDataRole.TextAlignmentRole and key in RIGHT_ALIGNED:
             return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-
-
-class TrackProxy(QSortFilterProxyModel):
-    """Sorting + text search + Genre/Artist/Album browser filters."""
-    def __init__(self):
-        super().__init__()
-        self.setSortRole(Qt.ItemDataRole.UserRole)
-        self.text = ""
-        self.genre = self.artist = self.album = None
-
-    def set_filters(self, text=None, genre="keep", artist="keep", album="keep"):
-        if text is not None: self.text = text.lower()
-        if genre != "keep": self.genre = genre
-        if artist != "keep": self.artist = artist
-        if album != "keep": self.album = album
-        self.invalidateFilter()
-
-    def matches(self, t, ignore=()):
-        if "genre" not in ignore and self.genre and t["genre"] != self.genre: return False
-        if "artist" not in ignore and self.artist and (t["album_artist"] or t["artist"]) != self.artist: return False
-        if "album" not in ignore and self.album and t["album"] != self.album: return False
-        if self.text:
-            hay = f'{t["title"]} {t["artist"]} {t["album"]} {t["genre"]}'.lower()
-            return all(w in hay for w in self.text.split())
-        return True
-
-    def filterAcceptsRow(self, row, parent):
-        return self.matches(self.sourceModel().tracks[row])
-
-    def lessThan(self, a, b):
-        m = self.sourceModel()
-        ta, tb = m.tracks[a.row()], m.tracks[b.row()]
-        if a.column() in (3, 4):  # artist/album: tie-break so albums stay in track order
-            col = COLUMNS[a.column()][1]
-            ka = (ta[col].lower(), ta["album"].lower(), ta["disc_no"], ta["track_no"])
-            kb = (tb[col].lower(), tb["album"].lower(), tb["disc_no"], tb["track_no"])
-            return ka < kb
-        return super().lessThan(a, b)

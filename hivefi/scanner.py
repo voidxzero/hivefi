@@ -96,7 +96,31 @@ def _under(path, folders):
     return any(path.startswith(f.rstrip("/") + "/") for f in folders)
 
 
-def scan(db, folders, progress=None, cancelled=lambda: False, skip=()) -> tuple[int, int]:
+def _parse_all(paths, cancelled, parallel_min):
+    """Yield read_tags(path) for each path, in order. Large batches are parsed in worker processes: mutagen is
+    pure Python, so threads would only fight the UI for the GIL (the window froze during the first scan)."""
+    if len(paths) >= parallel_min:
+        ex = None
+        try:
+            from concurrent.futures import ProcessPoolExecutor
+            ex = ProcessPoolExecutor(max_workers=max(1, min(6, (os.cpu_count() or 2) - 1)))
+            for res in ex.map(read_tags, paths, chunksize=32):
+                if cancelled():
+                    return
+                yield res
+            return
+        except Exception:  # noqa: BLE001 - no usable process pool: fall back to this thread
+            pass
+        finally:
+            if ex is not None:
+                ex.shutdown(wait=False, cancel_futures=True)
+    for p in paths:
+        if cancelled():
+            return
+        yield read_tags(p)
+
+
+def scan(db, folders, progress=None, cancelled=lambda: False, skip=(), parallel_min=64) -> tuple[int, int]:
     """Returns (added_or_updated, removed). Unchanged files (same mtime) are skipped.
 
     Folders in `skip` (switched off) or that are not currently reachable (e.g. an unmounted drive) are not
@@ -106,36 +130,40 @@ def scan(db, folders, progress=None, cancelled=lambda: False, skip=()) -> tuple[
     kept = [f for f in folders if f not in active]
     existing = {r["key"]: r["mtime"] for r in db.conn.execute(
         "SELECT key, mtime FROM tracks WHERE source='local'")}
-    db.mark_unseen("local")
-    db.conn.executemany("UPDATE tracks SET seen=1 WHERE key=?",
-                        [(k,) for k in existing if _under(k, kept)])
-    # keep unseen flag off for files that still exist but unchanged
-    n = 0
+    db.begin_pass()
+    db.touch([k for k in existing if _under(k, kept)])
     files = []
     for folder in active:
         for root, _, names in os.walk(folder):
             for name in names:
                 if os.path.splitext(name)[1].lower() in AUDIO_EXT:
                     files.append(os.path.join(root, name))
-    for i, path in enumerate(files):
-        if cancelled():
-            break
+    unchanged, todo = [], []
+    for path in files:
         try:
             mtime = os.path.getmtime(path)
         except OSError:
             continue
         if existing.get(path) == mtime:
-            db.conn.execute("UPDATE tracks SET seen=1 WHERE key=?", (path,))
+            unchanged.append(path)
         else:
-            tags = read_tags(path)
-            if tags is None:
-                continue
-            db.upsert_track(path, "local", path=path, mtime=mtime, cover_id=None, **tags)
-            n += 1
-        if i % 200 == 0:
-            db.commit()
-            if progress:
-                progress(i + 1, len(files))
-    removed = 0 if cancelled() else db.delete_unseen("local")
+            todo.append((path, mtime))
+    db.touch(unchanged)
+    n = 0
+    try:
+        for i, (tags, (path, mtime)) in enumerate(zip(_parse_all([p for p, _ in todo], cancelled, parallel_min), todo)):
+            if tags is not None:
+                n += db.upsert_track(path, "local", path=path, mtime=mtime, cover_id=None, **tags)
+            if i % 200 == 0:
+                db.conn.commit()
+                if progress:
+                    progress(i + 1, len(todo))
+    except BaseException:
+        db.abort_pass(); raise
+    if cancelled():
+        db.abort_pass(); db.commit()
+        return n, 0
+    removed = db.end_pass("local")
     db.commit()
+    db.all_tracks()                          # rebuild the track cache here, in the worker, not on the UI thread
     return n, removed

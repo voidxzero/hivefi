@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS tracks(
 CREATE INDEX IF NOT EXISTS ix_tracks_source ON tracks(source);
 CREATE INDEX IF NOT EXISTS ix_tracks_artist ON tracks(artist);
 CREATE INDEX IF NOT EXISTS ix_tracks_album ON tracks(album);
+CREATE INDEX IF NOT EXISTS ix_tracks_remote ON tracks(remote_id);
 CREATE TABLE IF NOT EXISTS playlists(
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, remote_id TEXT,
   sync INTEGER DEFAULT 0, dirty INTEGER DEFAULT 0
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS playlist_tracks(
   pos INTEGER NOT NULL, track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
   PRIMARY KEY(playlist_id, pos)
 );
+CREATE INDEX IF NOT EXISTS ix_pt_track ON playlist_tracks(track_id);
 CREATE TABLE IF NOT EXISTS pending_ops(
   id INTEGER PRIMARY KEY, op TEXT NOT NULL, payload TEXT NOT NULL, created REAL
 );
@@ -38,18 +40,25 @@ CREATE TABLE IF NOT EXISTS smart_playlists(id INTEGER PRIMARY KEY, name TEXT NOT
 """
 
 TRACK_COLS = ("title artist album_artist album genre year track_no disc_no duration "
-              "bitrate suffix size rating starred play_count last_played mtime cover_id rg_gain").split()
+              "bitrate suffix size rating starred play_count last_played mtime cover_id rg_gain folder_id").split()
 
 
 class Database:
     def __init__(self, path):
         self.path = str(path)
         self._local = threading.local()
+        self._cache: dict = {}            # source|None -> shared list of track dicts (see all_tracks)
+        self._cache_lock = threading.Lock()
+        self._by_id: dict = {}
+        self._by_id_for = None
         self.conn.executescript(SCHEMA)
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tracks)")}
         if "rg_gain" not in cols:   # migration: ReplayGain (dB); force local files to be re-read once
             self.conn.execute("ALTER TABLE tracks ADD COLUMN rg_gain REAL")
             self.conn.execute("UPDATE tracks SET mtime=0 WHERE source='local'")
+            self.conn.commit()
+        if "folder_id" not in cols:   # migration: which Subsonic music folder (library) a server track came from
+            self.conn.execute("ALTER TABLE tracks ADD COLUMN folder_id TEXT")
             self.conn.commit()
 
     @property
@@ -65,44 +74,89 @@ class Database:
 
     # ---- tracks -------------------------------------------------------
     def upsert_track(self, key, source, remote_id=None, path=None, **f):
-        """Insert/update by key. Never clobbers local play stats unless supplied."""
-        c = self.conn
+        """Insert/update by key in one statement. Rows whose values did not change are not written at all, so
+        the return value tells a sync whether anything really changed. Never clobbers local play stats unless supplied."""
         f = {k: v for k, v in f.items() if k in TRACK_COLS}
-        row = c.execute("SELECT id FROM tracks WHERE key=?", (key,)).fetchone()
-        if row:
-            sets = ", ".join(f"{k}=?" for k in f) + (", " if f else "") + "seen=1, remote_id=?, path=?"
-            c.execute(f"UPDATE tracks SET {sets} WHERE id=?", (*f.values(), remote_id, path, row["id"]))
-            return row["id"]
-        f.setdefault("date_added", time.time())
-        cols = ["key", "source", "remote_id", "path", *f]
-        cur = c.execute(f"INSERT INTO tracks({','.join(cols)}) VALUES({','.join('?' * len(cols))})",
-                        (key, source, remote_id, path, *f.values()))
-        return cur.lastrowid
+        cols = ["key", "source", "remote_id", "path", *f, "date_added"]
+        vals = (key, source, remote_id, path, *f.values(), time.time())
+        upd = ["remote_id", "path", *f]
+        sql = (f"INSERT INTO tracks({','.join(cols)}) VALUES({','.join('?' * len(cols))}) "
+               f"ON CONFLICT(key) DO UPDATE SET {', '.join(f'{c}=excluded.{c}' for c in upd)} "
+               f"WHERE {' OR '.join(f'{c} IS NOT excluded.{c}' for c in upd)}")
+        cur = self.conn.execute(sql, vals)
+        self._mark_seen((key,))
+        return cur.rowcount > 0                  # False when the row already had exactly these values
 
-    def mark_unseen(self, source):
-        self.conn.execute("UPDATE tracks SET seen=0 WHERE source=?", (source,))
+    # ---- "which rows still exist" passes (scan / sync): much cheaper than flagging every row twice -------
+    def begin_pass(self):
+        c = self.conn
+        c.execute("CREATE TEMP TABLE IF NOT EXISTS pass_seen(key TEXT PRIMARY KEY) WITHOUT ROWID")
+        c.execute("DELETE FROM pass_seen")
+        self._local.in_pass = True
 
-    def delete_unseen(self, source) -> int:
-        cur = self.conn.execute("DELETE FROM tracks WHERE source=? AND seen=0", (source,))
+    def _mark_seen(self, keys):
+        if getattr(self._local, "in_pass", False):
+            self.conn.executemany("INSERT OR IGNORE INTO pass_seen VALUES(?)", [(k,) for k in keys])
+
+    def touch(self, keys):
+        """Keep these rows (they exist but were not re-read)."""
+        self._mark_seen(keys)
+
+    def end_pass(self, source) -> int:
+        """Delete rows of `source` that were neither upserted nor touched since begin_pass()."""
+        self._local.in_pass = False
+        cur = self.conn.execute("DELETE FROM tracks WHERE source=? AND key NOT IN (SELECT key FROM pass_seen)",
+                                (source,))
+        self.conn.execute("DELETE FROM pass_seen")
         return cur.rowcount
+
+    def abort_pass(self):
+        self._local.in_pass = False
 
     def delete_tracks(self, ids):
         """Remove tracks from the library (files are never touched)."""
         ids = list(ids)
         self.conn.executemany("DELETE FROM playlist_tracks WHERE track_id=?", [(i,) for i in ids])
         self.conn.executemany("DELETE FROM tracks WHERE id=?", [(i,) for i in ids])
-        self.conn.commit()
+        self.commit()
 
     def commit(self):
         self.conn.commit()
+        self.invalidate()
+
+    def invalidate(self):
+        with self._cache_lock:
+            self._cache = {}
 
     def all_tracks(self, source=None):
-        q = "SELECT * FROM tracks"
-        args = ()
-        if source:
-            q += " WHERE source=?"
-            args = (source,)
-        return [dict(r) for r in self.conn.execute(q, args)]
+        """Every track as a dict. The dicts are shared and cached until the next commit() (a 60k-track library
+        would otherwise be re-read and re-converted on every refresh): the *list* is yours, the dicts are the
+        library's. Point updates (rating/star/plays) patch the cached dicts in place."""
+        with self._cache_lock:
+            hit = self._cache.get(source)
+        if hit is not None:
+            return list(hit)
+        if source is None:
+            cur = self.conn.cursor(); cur.row_factory = None          # plain tuples + zip: ~25% faster than dict(Row)
+            cur.execute("SELECT * FROM tracks")
+            cols = [d[0] for d in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur]
+        else:
+            rows = [t for t in self.all_tracks(None) if t["source"] == source]
+        with self._cache_lock:
+            return list(self._cache.setdefault(source, rows))
+
+    def _patch(self, ids, **fields):
+        with self._cache_lock:
+            full = self._cache.get(None)
+            if full is None:
+                return
+            if self._by_id_for is not full:
+                self._by_id = {t["id"]: t for t in full}; self._by_id_for = full
+            for i in ids:
+                t = self._by_id.get(i)
+                if t:
+                    t.update(fields)
 
     def track(self, tid):
         r = self.conn.execute("SELECT * FROM tracks WHERE id=?", (tid,)).fetchone()
@@ -113,14 +167,28 @@ class Database:
         return dict(r) if r else None
 
     def set_rating(self, tid, rating):
-        self.conn.execute("UPDATE tracks SET rating=? WHERE id=?", (rating, tid)); self.commit()
+        self.set_ratings([tid], rating)
+
+    def set_ratings(self, ids, rating):
+        ids = list(ids)
+        self.conn.executemany("UPDATE tracks SET rating=? WHERE id=?", [(rating, i) for i in ids])
+        self.conn.commit(); self._patch(ids, rating=rating)
 
     def set_starred(self, tid, v):
-        self.conn.execute("UPDATE tracks SET starred=? WHERE id=?", (int(v), tid)); self.commit()
+        self.set_starred_many([tid], v)
+
+    def set_starred_many(self, ids, v):
+        ids = list(ids)
+        self.conn.executemany("UPDATE tracks SET starred=? WHERE id=?", [(int(v), i) for i in ids])
+        self.conn.commit(); self._patch(ids, starred=int(v))
 
     def bump_play(self, tid):
-        self.conn.execute("UPDATE tracks SET play_count=play_count+1, last_played=? WHERE id=?",
-                          (time.time(), tid)); self.commit()
+        now = time.time()
+        self.conn.execute("UPDATE tracks SET play_count=play_count+1, last_played=? WHERE id=?", (now, tid))
+        self.conn.commit()
+        t = self.track(tid)
+        if t:
+            self._patch([tid], play_count=t["play_count"], last_played=now)
 
     # ---- playlists ----------------------------------------------------
     def playlists(self):
@@ -141,9 +209,20 @@ class Database:
         self.conn.execute("DELETE FROM playlists WHERE id=?", (pid,)); self.commit()
 
     def playlist_tracks(self, pid):
-        return [dict(r) for r in self.conn.execute(
-            "SELECT t.* FROM playlist_tracks p JOIN tracks t ON t.id=p.track_id "
-            "WHERE p.playlist_id=? ORDER BY p.pos", (pid,))]
+        """Tracks of a playlist in order (the same shared dicts all_tracks() returns)."""
+        ids = [r[0] for r in self.conn.execute(
+            "SELECT track_id FROM playlist_tracks WHERE playlist_id=? ORDER BY pos", (pid,))]
+        if not ids:
+            return []
+        self.all_tracks(None)
+        with self._cache_lock:
+            full = self._cache.get(None)
+            if full is not None:
+                if self._by_id_for is not full:
+                    self._by_id = {t["id"]: t for t in full}; self._by_id_for = full
+                by_id = self._by_id
+                return [by_id[i] for i in ids if i in by_id]
+        return [t for t in (self.track(i) for i in ids) if t]
 
     def set_playlist_tracks(self, pid, track_ids, mark_dirty=True):
         c = self.conn
@@ -175,9 +254,18 @@ class Database:
         self.conn.execute("DELETE FROM smart_playlists WHERE id=?", (sid,)); self.commit()
 
     # ---- offline op queue --------------------------------------------
-    def queue_op(self, op, payload):
+    def queue_op(self, op, payload, commit=True):
         self.conn.execute("INSERT INTO pending_ops(op,payload,created) VALUES(?,?,?)",
-                          (op, json.dumps(payload), time.time())); self.commit()
+                          (op, json.dumps(payload), time.time()))
+        if commit:
+            self.conn.commit()
+
+    def queue_ops(self, op, payloads):
+        """Queue many operations of one kind in a single transaction."""
+        now = time.time()
+        self.conn.executemany("INSERT INTO pending_ops(op,payload,created) VALUES(?,?,?)",
+                              [(op, json.dumps(p), now) for p in payloads])
+        self.conn.commit()
 
     def pending_ops(self):
         return [(r["id"], r["op"], json.loads(r["payload"]))
