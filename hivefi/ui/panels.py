@@ -3,16 +3,39 @@ import bisect
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QPixmap
+from PyQt6.QtCore import QEvent, QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (QAbstractItemView, QLabel, QListWidget, QListWidgetItem, QPlainTextEdit,
                              QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
 
 from .models import fmt_time
 
 
+BORDER = 2
+
+
+def with_border(pm: QPixmap, color, width=BORDER) -> QPixmap:
+    """The pixmap framed by a border drawn around it (the result is 2*width larger in each direction)."""
+    out = QPixmap(pm.width() + 2 * width, pm.height() + 2 * width)
+    out.fill(Qt.GlobalColor.transparent)
+    p = QPainter(out)
+    p.drawPixmap(width, width, pm)
+    p.setPen(QPen(QColor(color), width)); p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRect(QRectF(width / 2, width / 2, out.width() - width, out.height() - width))
+    p.setPen(QPen(QColor(0, 0, 0, 90), 1))                      # thin dark line where the art meets the frame
+    p.drawRect(QRectF(width - 0.5, width - 0.5, pm.width() + 1, pm.height() + 1))
+    p.end()
+    return out
+
+
+def border_color(widget) -> QColor:
+    """Frame colour that stands out from the current skin's background (follows light and dark skins)."""
+    pal = widget.palette()
+    return pal.mid().color().lighter(135) if pal.window().color().lightness() < 128 else pal.mid().color().darker(125)
+
+
 class ArtLabel(QLabel):
-    """Square-fitting cover art that rescales with its container."""
+    """Square-fitting cover art that rescales with its container, with a border around the picture."""
     def __init__(self):
         super().__init__()
         self._pm: QPixmap | None = None
@@ -30,9 +53,14 @@ class ArtLabel(QLabel):
     def _update(self):
         if self._pm is None or self._pm.isNull():
             self.clear(); self.setText("♪"); self.setFont(QFont(self.font().family(), 36)); return
-        s = max(32, min(self.width(), self.height()) - 4)
-        self.setPixmap(self._pm.scaled(s, s, Qt.AspectRatioMode.KeepAspectRatio,
-                                       Qt.TransformationMode.SmoothTransformation))
+        s = max(32, min(self.width(), self.height()) - 4 - 2 * BORDER)
+        scaled = self._pm.scaled(s, s, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        self.setPixmap(with_border(scaled, border_color(self)))
+
+    def changeEvent(self, e):
+        if e.type() == QEvent.Type.PaletteChange and self._pm is not None:
+            self._update()                                      # skin changed: redraw the frame in its colour
+        super().changeEvent(e)
 
 
 class NowPlayingPanel(QWidget):

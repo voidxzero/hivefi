@@ -309,3 +309,34 @@ def test_edit_mode_locks_resizing(win):
     # layouts keep the lock: applying one while locked leaves it locked
     w._apply_builtin_layout("Everything")
     assert w.dock_sources.titleBarWidget() is not None
+
+
+def test_album_art_has_a_border():
+    from PyQt6.QtGui import QColor, QPixmap
+    from hivefi import skins
+    from hivefi.ui.panels import ArtLabel, BORDER, with_border
+    from hivefi.ui.album_grid import AlbumGrid, ICON
+    for skin in ("Dark", "Chrome Deck"):
+        skins.apply_skin(app, skin)
+        a = ArtLabel(); a.resize(240, 240)
+        pm = QPixmap(200, 200); pm.fill(QColor("#c03030")); a.set_art(pm)
+        img = a.pixmap().toImage()
+        edge, inside = img.pixelColor(0, 100), img.pixelColor(100, 100)
+        assert inside.name() == "#c03030" and edge.name() != inside.name() and edge.alpha() == 255
+        assert img.pixelColor(img.width() - 1, 100) == edge and img.pixelColor(100, 0) == edge
+        a.set_art(None)                                      # no cover: the music-note placeholder, no stale frame
+    framed = with_border(pm, "#00ff00")
+    assert framed.width() == pm.width() + 2 * BORDER and framed.toImage().pixelColor(0, 100) == QColor("#00ff00")
+    g = AlbumGrid(lambda: None)
+    t = [{"album": "A", "album_artist": "B", "artist": "B", "title": "t", "disc_no": 1, "track_no": 1,
+          "source": "local", "path": "/none", "cover_id": None, "id": 1}]
+    g.set_tracks(t)
+    ph = g.item(0).icon().pixmap(ICON, ICON).toImage()
+    assert ph.pixelColor(0, ICON // 2).alpha() == 255 and ph.pixelColor(ICON // 2, ICON // 2) != ph.pixelColor(0, ICON // 2)
+    big = QPixmap(400, 300); big.fill(QColor("#3070c0")); buf = __import__("PyQt6.QtCore", fromlist=["QBuffer"]).QBuffer()
+    buf.open(buf.OpenModeFlag.WriteOnly); big.save(buf, "PNG")
+    g._on_loaded(g._gen, next(iter(g._items)), bytes(buf.data()))
+    ic = g.item(0).icon().pixmap(ICON, ICON).toImage()
+    assert ic.pixelColor(ICON // 2, ICON // 2).name() == "#3070c0"      # the cover itself, inside a frame
+    left = next(x for x in range(ICON) if ic.pixelColor(x, ICON // 2).alpha() > 0)    # first drawn pixel = frame
+    assert ic.pixelColor(left, ICON // 2).name() != "#3070c0" and ic.pixelColor(left + BORDER + 1, ICON // 2).name() == "#3070c0"

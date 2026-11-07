@@ -4,6 +4,7 @@ from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QAbstractItemView, QListView, QListWidget, QListWidgetItem, QToolTip
 
 from .. import art
+from .panels import BORDER, border_color, with_border
 
 ICON = 150
 KEY = Qt.ItemDataRole.UserRole
@@ -25,11 +26,12 @@ class _Job(QRunnable):
         self.sigs.loaded.emit(self.gen, self.key, data)
 
 
-def _placeholder(color: QColor):
-    pm = QPixmap(ICON, ICON); pm.fill(color)
+def _placeholder(color: QColor, frame: QColor):
+    inner = ICON - 2 * BORDER
+    pm = QPixmap(inner, inner); pm.fill(color)
     p = QPainter(pm); p.setPen(QColor(255, 255, 255, 70)); f = p.font(); f.setPointSize(40); p.setFont(f)
     p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, "♪"); p.end()
-    return QIcon(pm)
+    return QIcon(with_border(pm, frame))
 
 
 class AlbumGrid(QListWidget):
@@ -59,10 +61,10 @@ class AlbumGrid(QListWidget):
         self.sigs = _Signals(); self.sigs.loaded.connect(self._on_loaded)
         self._timer = QTimer(self, singleShot=True, interval=80, timeout=self._request_visible)
         self.verticalScrollBar().valueChanged.connect(lambda _v: self._timer.start())
-        self.placeholder = _placeholder(QColor(60, 60, 66))
+        self.placeholder = _placeholder(QColor(60, 60, 66), border_color(self))
 
     def set_placeholder_color(self, c: QColor):
-        self.placeholder = _placeholder(c)
+        self.placeholder = _placeholder(c, border_color(self))
 
     def set_tracks(self, tracks):
         self._gen += 1; self._requested.clear()
@@ -141,7 +143,8 @@ class AlbumGrid(QListWidget):
         pm = QPixmap()
         if not pm.loadFromData(data):
             return
-        pm = pm.scaled(ICON, ICON, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        pm = pm.scaled(ICON - 2 * BORDER, ICON - 2 * BORDER, Qt.AspectRatioMode.KeepAspectRatio,
+                       Qt.TransformationMode.SmoothTransformation)
         it = self._items.get(key)
         if it is not None:
-            it.setIcon(QIcon(pm))
+            it.setIcon(QIcon(with_border(pm, border_color(self))))
