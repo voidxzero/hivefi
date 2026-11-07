@@ -1,0 +1,16 @@
+[project]
+name = "hivefi"
+version = "0.1.0"
+description = "Music manager and player for Linux with Navidrome/Subsonic sync"
+requires-python = ">=3.10"
+dependencies = ["PyQt6", "mutagen", "requests"]
+
+[project.scripts]
+hivefi = "hivefi.ui.main_window:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["hivefi", "hivefi.ui"]

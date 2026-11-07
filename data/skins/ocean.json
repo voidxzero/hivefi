@@ -1,0 +1,8 @@
+{
+  "name": "Ocean",
+  "base": "Midnight",
+  "window": "#10202b",
+  "accent": "#00e5c0",
+  "highlight": "#0b7a75",
+  "qss": "QToolBar { border: 0; spacing: 4px; }"
+}

@@ -1,0 +1,1106 @@
+import json
+import os
+import random
+import sys
+import time
+from pathlib import Path
+
+from PyQt6.QtCore import QByteArray, QSize, Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import (QAction, QActionGroup, QColor, QCursor, QDesktopServices, QIcon, QKeySequence, QPixmap,
+                         QShortcut)
+from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget, QFileDialog, QInputDialog, QLabel,
+                             QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox, QPushButton, QSlider,
+                             QSplitter, QStackedWidget, QStyle, QSystemTrayIcon, QTableView, QToolBar,
+                             QTreeWidget, QTreeWidgetItem)
+
+from .. import art, scanner, sync
+from ..config import Config, data_dir
+from ..db import Database
+from ..mpris import Mpris
+from ..player import Player
+from ..subsonic import Subsonic, SubsonicError
+from .. import lyrics, skins, smart, tagedit, updater
+from .album_grid import AlbumGrid
+from .dialogs import TagDialog
+from .audio_dialog import AudioDialog
+from .duplicates_dialog import DuplicatesDialog
+from .equalizer import EqualizerPanel
+from .mini import MiniPlayer
+from .models import COLUMNS, DEFAULT_HIDDEN, MIME, TrackModel, TrackProxy, fmt_time
+from .panels import LyricsPanel, NowPlayingPanel, TrackInfoPanel, UpNextPanel
+from .smart_dialog import SmartDialog
+from .settings_dialog import SettingsDialog
+
+ALL = "[All]"
+
+
+class Worker(QThread):
+    progress = pyqtSignal(str)
+    done = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self.fn = fn
+
+    def run(self):
+        try:
+            self.done.emit(self.fn(self.progress.emit))
+        except Exception as e:  # noqa: BLE001 - surfaced to UI
+            self.failed.emit(str(e))
+
+
+class SourceTree(QTreeWidget):
+    """Source tree that accepts track drops onto playlists."""
+    tracksDropped = pyqtSignal(int, list)
+
+    def __init__(self):
+        super().__init__()
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+
+    def _playlist_at(self, pos):
+        it = self.itemAt(pos)
+        d = it.data(0, Qt.ItemDataRole.UserRole) if it else None
+        return d[1] if d and d[0] == "playlist" else None
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasFormat(MIME): e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):
+        if e.mimeData().hasFormat(MIME) and self._playlist_at(e.position().toPoint()) is not None:
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dropEvent(self, e):
+        pid = self._playlist_at(e.position().toPoint())
+        if pid is not None and e.mimeData().hasFormat(MIME):
+            self.tracksDropped.emit(pid, json.loads(bytes(e.mimeData().data(MIME)).decode()))
+            e.acceptProposedAction()
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, cfg: Config, db: Database):
+        super().__init__()
+        self.cfg, self.db = cfg, db
+        self.api: Subsonic | None = None
+        self._rebuild_api()
+        self.setWindowTitle("Hivefi")
+        self.resize(1280, 780)
+        self.player = Player(self._resolve, cfg, self)
+        self.player.set_volume(cfg.volume)
+        self.player.shuffle, self.player.repeat = cfg.shuffle, cfg.repeat
+        self.player.auto_dj = self._auto_dj_tracks if cfg.auto_dj else None
+        self.skin_tokens = skins.all_skins().get(cfg.skin) or skins.BUILTIN[skins.DEFAULT]
+        self._quitting = False
+        self.restart_requested = False
+        self.source = ("all", None)
+        self._workers: set[Worker] = set()
+        self._sync_worker = self._scan_worker = self._flush_worker = None
+        self._art_token = 0
+        self._sorted_once = False
+
+        self._build_ui()
+        self._build_menu()
+        self._connect_player()
+        self.mpris = Mpris(self, self.player)
+        self.mini = MiniPlayer(self.player)
+        self.mini.restoreRequested.connect(self._leave_mini)
+        self._build_tray()
+        self._init_equalizer()
+        self._default_state = self.saveState()
+        if cfg.geometry:
+            self.restoreGeometry(QByteArray.fromBase64(cfg.geometry.encode()))
+        if cfg.state:
+            self.restoreState(QByteArray.fromBase64(cfg.state.encode()))
+        if cfg.header_state:
+            self.table.horizontalHeader().restoreState(QByteArray.fromBase64(cfg.header_state.encode()))
+            self._sorted_once = True
+        self._set_view_mode(cfg.view_mode, initial=True)
+        self._apply_skin_visuals()
+        self.sleep_timer = QTimer(self, singleShot=True, timeout=self._sleep_fire)
+
+        self.sync_timer = QTimer(self, timeout=lambda: self.sync_now(silent=True))
+        self._apply_sync_timer()
+        self.refresh_playlists()
+        self.load_source()
+        QTimer.singleShot(500, self._startup)
+
+    # ------------------------------------------------------------ setup
+    def _rebuild_api(self):
+        c = self.cfg
+        self.api = Subsonic(c.server_url, c.username, c.password) if c.server_enabled else None
+
+    def _resolve(self, t):
+        if t["source"] == "local":
+            return QUrl.fromLocalFile(t["path"])
+        if self.api is None:
+            return QUrl()
+        return QUrl(self.api.stream_url(t["remote_id"], self.cfg.max_bitrate))
+
+    # tracks from libraries that are switched off never show up anywhere
+    def _tracks(self, source=None):
+        return [t for t in self.db.all_tracks(source) if self.cfg.track_enabled(t)]
+
+    def _playlist_tracks(self, pid):
+        return [t for t in self.db.playlist_tracks(pid) if self.cfg.track_enabled(t)]
+
+    def _icon(self, sp):
+        return self.style().standardIcon(sp)
+
+    def _build_ui(self):
+        S = QStyle.StandardPixmap
+        tb = QToolBar("Transport"); tb.setMovable(False); tb.setIconSize(QSize(24, 24))
+        self.addToolBar(tb)
+        self.act_prev = tb.addAction(self._icon(S.SP_MediaSkipBackward), "Previous", self.player.previous)
+        self.act_play = tb.addAction(self._icon(S.SP_MediaPlay), "Play/Pause", self.player.toggle)
+        self.act_stop = tb.addAction(self._icon(S.SP_MediaStop), "Stop", self.player.stop)
+        self.act_next = tb.addAction(self._icon(S.SP_MediaSkipForward), "Next", self.player.next)
+        tb.addSeparator()
+        self.btn_shuffle = QPushButton("Shuffle"); self.btn_shuffle.setCheckable(True)
+        self.btn_shuffle.setChecked(self.cfg.shuffle); self.btn_shuffle.toggled.connect(self._set_shuffle)
+        self.btn_repeat = QPushButton(); self.btn_repeat.clicked.connect(self._cycle_repeat)
+        self._update_repeat_label()
+        tb.addWidget(self.btn_shuffle); tb.addWidget(self.btn_repeat)
+        tb.addSeparator()
+        self.lbl_pos = QLabel("0:00"); self.lbl_pos.setMinimumWidth(44)
+        self.seek = QSlider(Qt.Orientation.Horizontal); self.seek.setMinimumWidth(260)
+        self.seek.sliderMoved.connect(self.player.seek)
+        self.lbl_dur = QLabel("0:00"); self.lbl_dur.setMinimumWidth(44)
+        for w in (self.lbl_pos, self.seek, self.lbl_dur):
+            tb.addWidget(w)
+        tb.addSeparator()
+        vol_icon = QLabel(); vol_icon.setPixmap(self._icon(S.SP_MediaVolume).pixmap(18, 18))
+        self.vol = QSlider(Qt.Orientation.Horizontal); self.vol.setRange(0, 100); self.vol.setFixedWidth(100)
+        self.vol.setValue(self.cfg.volume); self.vol.valueChanged.connect(self._set_volume)
+        tb.addWidget(vol_icon); tb.addWidget(self.vol)
+        tb.addSeparator()
+        self.search = QLineEdit(); self.search.setPlaceholderText("Search…"); self.search.setClearButtonEnabled(True)
+        self.search.setFixedWidth(220); self.search.textChanged.connect(self._on_search)
+        tb.addWidget(self.search)
+
+        # view mode buttons
+        tb.addSeparator()
+        self.mode_group = QActionGroup(self)
+        self.act_browser = tb.addAction("Columns"); self.act_albums = tb.addAction("Albums")
+        for act, mode in ((self.act_browser, "browser"), (self.act_albums, "albums")):
+            act.setCheckable(True); self.mode_group.addAction(act)
+            act.triggered.connect(lambda _c, m=mode: self._set_view_mode(m))
+
+        # sources tree
+        self.tree = SourceTree(); self.tree.setHeaderHidden(True)
+        self.tree.tracksDropped.connect(self._drop_to_playlist); self.tree.setMinimumWidth(170)
+        self.tree.itemSelectionChanged.connect(self._on_source)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._tree_menu)
+
+        # column browser
+        self.lists = {}
+        browser = QSplitter(Qt.Orientation.Horizontal)
+        for name in ("genre", "artist", "album"):
+            lw = QListWidget(); lw.setObjectName(name)
+            lw.currentRowChanged.connect(lambda _r, n=name: self._on_browser(n))
+            self.lists[name] = lw; browser.addWidget(lw)
+
+        # album grid
+        self.grid = AlbumGrid(lambda: self.api)
+        self.grid.albumSelected.connect(self._on_grid_album)
+        self.grid.playRequested.connect(lambda ts: self.player.play_list(ts, 0))
+        self.grid.contextRequested.connect(self._grid_menu)
+        self.top_stack = QStackedWidget(); self.top_stack.addWidget(browser); self.top_stack.addWidget(self.grid)
+
+        # track table
+        self.model = TrackModel(); self.proxy = TrackProxy(); self.proxy.setSourceModel(self.model)
+        self.table = QTableView(); self.table.setModel(self.proxy)
+        self.table.setSortingEnabled(True); self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.verticalHeader().hide(); self.table.verticalHeader().setDefaultSectionSize(22)
+        self.table.setShowGrid(False)
+        hh = self.table.horizontalHeader()
+        hh.setStretchLastSection(True); hh.setSectionsMovable(True)
+        hh.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        hh.customContextMenuRequested.connect(self._header_menu)
+        for i, (_, key, w) in enumerate(COLUMNS):
+            self.table.setColumnWidth(i, w)
+            self.table.setColumnHidden(i, key in DEFAULT_HIDDEN)
+        self.table.setDragEnabled(True)
+        self.table.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.table.doubleClicked.connect(self._on_double)
+        self.table.clicked.connect(self._on_table_click)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._track_menu)
+        self.table.selectionModel().selectionChanged.connect(lambda *_: self._sel_changed())
+        QShortcut(QKeySequence(Qt.Key.Key_Space), self.table, self.player.toggle,
+                  context=Qt.ShortcutContext.WidgetShortcut)
+        QShortcut(QKeySequence(Qt.Key.Key_Return), self.table, self._play_selected,
+                  context=Qt.ShortcutContext.WidgetShortcut)
+
+        self.main_split = main = QSplitter(Qt.Orientation.Vertical)
+        main.addWidget(self.top_stack); main.addWidget(self.table); main.setSizes([190, 600])
+        self.setCentralWidget(main)
+
+        # dockable panels
+        self.np_panel = NowPlayingPanel(); self.next_panel = UpNextPanel()
+        self.lyrics_panel = LyricsPanel(); self.info_panel = TrackInfoPanel()
+        L, R = Qt.DockWidgetArea.LeftDockWidgetArea, Qt.DockWidgetArea.RightDockWidgetArea
+        self.dock_sources = self._dock("Sources", self.tree, "dock_sources", L)
+        self.dock_np = self._dock("Now Playing", self.np_panel, "dock_np", L)
+        self.dock_next = self._dock("Up Next", self.next_panel, "dock_next", R)
+        self.dock_lyrics = self._dock("Lyrics", self.lyrics_panel, "dock_lyrics", R)
+        self.dock_info = self._dock("Track Info", self.info_panel, "dock_info", R)
+        self.eq_panel = EqualizerPanel(self.cfg, self.player.mp.eq_available)
+        self.dock_eq = self._dock("Equalizer", self.eq_panel, "dock_eq", R)
+        self.tabifyDockWidget(self.dock_next, self.dock_lyrics); self.tabifyDockWidget(self.dock_lyrics, self.dock_info)
+        self.tabifyDockWidget(self.dock_info, self.dock_eq)
+        for d in (self.dock_next, self.dock_lyrics, self.dock_info, self.dock_eq):
+            d.hide()
+        self.dock_np.setMinimumHeight(200)
+        self.dock_lyrics.visibilityChanged.connect(lambda v: v and self._refresh_lyrics())
+        self.dock_next.visibilityChanged.connect(lambda v: v and self._refresh_next())
+        self.dock_info.visibilityChanged.connect(lambda v: v and self._sel_changed())
+        self.next_panel.jumpRequested.connect(self.player.jump)
+        self.next_panel.removeRequested.connect(self.player.remove)
+        self.status_lbl = QLabel(""); self.statusBar().addWidget(self.status_lbl, 1)
+        self.sync_lbl = QLabel(""); self.statusBar().addPermanentWidget(self.sync_lbl)
+
+        for key in (Qt.Key.Key_MediaTogglePlayPause, Qt.Key.Key_MediaPlay):
+            QShortcut(QKeySequence(key), self, self.player.toggle)
+        QShortcut(QKeySequence(Qt.Key.Key_MediaNext), self, self.player.next)
+        QShortcut(QKeySequence(Qt.Key.Key_MediaPrevious), self, self.player.previous)
+        QShortcut(QKeySequence(Qt.Key.Key_MediaStop), self, self.player.stop)
+
+    def _build_menu(self):
+        mb = self.menuBar()
+        f = mb.addMenu("&File")
+        f.addAction("Add &Folder to Library…", self._add_folder)
+        f.addAction("&Rescan Library", QKeySequence("F5"), self.scan_library)
+        f.addAction("New &Auto Playlist…", self._new_smart)
+        f.addAction("&Import Playlist (M3U)…", self._import_m3u)
+        f.addAction("Find &Duplicates…", self._find_duplicates)
+        f.addSeparator()
+        f.addAction("&Sync with Navidrome", QKeySequence("Ctrl+Shift+S"), self.sync_now)
+        f.addAction("&Preferences…", QKeySequence("Ctrl+,"), self.open_settings)
+        f.addSeparator()
+        f.addAction("&Quit", QKeySequence("Ctrl+Q"), self._quit)
+        p = mb.addMenu("&Playback")
+        p.addAction("Play/Pause", QKeySequence("Ctrl+Space"), self.player.toggle)
+        p.addAction("Next", QKeySequence("Ctrl+Right"), self.player.next)
+        p.addAction("Previous", QKeySequence("Ctrl+Left"), self.player.previous)
+        p.addAction("Clear Queue", self.player.clear)
+        p.addSeparator()
+        sm = p.addMenu("Sleep Timer"); self.sleep_group = QActionGroup(self)
+        for label, mins in (("Off", 0), ("15 minutes", 15), ("30 minutes", 30), ("45 minutes", 45),
+                            ("1 hour", 60), ("90 minutes", 90)):
+            a = sm.addAction(label); a.setCheckable(True); a.setChecked(mins == 0); self.sleep_group.addAction(a)
+            a.triggered.connect(lambda _c, m=mins: self._set_sleep(m))
+        p.addAction("Equalizer", QKeySequence("Ctrl+E"), self.show_equalizer)
+        p.addSeparator()
+        a = p.addAction("Auto-DJ (keep playing similar-random tracks)"); a.setCheckable(True)
+        a.setChecked(self.cfg.auto_dj); a.toggled.connect(self._toggle_auto_dj)
+        rm = p.addMenu("ReplayGain"); rg_group = QActionGroup(self)
+        for label, mode in (("Off", "off"), ("Track gain", "track"), ("Album gain", "album")):
+            a = rm.addAction(label); a.setCheckable(True); a.setChecked(self.cfg.rg_mode == mode); rg_group.addAction(a)
+            a.triggered.connect(lambda _c, m=mode: self._set_rg_mode(m))
+        p.addAction("Audio Settings…", QKeySequence("Ctrl+Shift+A"), self.open_audio_settings)
+        v = mb.addMenu("&View")
+        v.addAction("Focus Search", QKeySequence("Ctrl+F"), self.search.setFocus)
+        v.addAction("Lyrics", QKeySequence("Ctrl+L"), self.show_lyrics)
+        v.addSeparator()
+        self.lib_menu = v.addMenu("Libraries"); self.lib_menu.aboutToShow.connect(self._build_lib_menu)
+        pm = v.addMenu("Panels")
+        for d in (self.dock_sources, self.dock_np, self.dock_next, self.dock_lyrics, self.dock_info, self.dock_eq):
+            pm.addAction(d.toggleViewAction())
+        pm.addSeparator(); pm.addAction("Reset Layout", self._reset_layout)
+        v.addAction("Columns View", lambda: self._set_view_mode("browser"))
+        v.addAction("Albums View", lambda: self._set_view_mode("albums"))
+        self.skin_menu = v.addMenu("Skin"); self._build_skin_menu()
+        v.addSeparator()
+        v.addAction("Mini Player", QKeySequence("Ctrl+M"), self._enter_mini)
+        v.addAction("Full Screen", QKeySequence("F11"),
+                    lambda: self.showNormal() if self.isFullScreen() else self.showFullScreen())
+        h = mb.addMenu("&Help")
+        h.addAction("Check for &Updates…", lambda: self.check_updates(manual=True))
+
+    def _connect_player(self):
+        P = self.player
+        P.positionChanged.connect(self.lyrics_panel.set_position)
+        self.lyrics_panel.seekRequested.connect(P.seek)
+        P.trackChanged.connect(self._on_track)
+        P.stateChanged.connect(lambda pl: self.act_play.setIcon(
+            self._icon(QStyle.StandardPixmap.SP_MediaPause if pl else QStyle.StandardPixmap.SP_MediaPlay)))
+        P.positionChanged.connect(self._on_pos)
+        P.durationChanged.connect(self._on_dur)
+        P.queueChanged.connect(self._on_queue_changed)
+        P.played.connect(self._on_played)
+        P.nowPlaying.connect(self._on_now_playing)
+        P.error.connect(lambda m: self.statusBar().showMessage(f"Playback error: {m}", 8000))
+
+    # ------------------------------------------------------- sources
+    def refresh_playlists(self):
+        sel = self.source
+        self.tree.blockSignals(True)
+        self.tree.clear()
+        def item(parent, text, data):
+            it = QTreeWidgetItem(parent, [text]); it.setData(0, Qt.ItemDataRole.UserRole, data); return it
+        lib = item(self.tree, "Library", None)
+        self._items = {("all", None): item(lib, "All Music", ("all", None)),
+                       ("local", None): item(lib, "This Computer", ("local", None))}
+        if self.cfg.server_configured:
+            nav = item(lib, "Navidrome" if self.cfg.server_enabled else "Navidrome (off)", ("remote", None))
+            if not self.cfg.server_enabled:
+                nav.setForeground(0, self.palette().placeholderText())
+            self._items[("remote", None)] = nav
+        self._items[("queue", None)] = item(self.tree, "Now Playing", ("queue", None))
+        pls = item(self.tree, "Playlists", None)
+        for p in self.db.playlists():
+            if p["sync"] and not self.cfg.server_enabled:      # server-backed playlists hide with Navidrome
+                continue
+            self._items[("playlist", p["id"])] = item(pls, p["name"] + ("  ☁" if p["sync"] else ""),
+                                                    ("playlist", p["id"]))
+        auto = item(self.tree, "Auto Playlists", None)
+        for name in smart.PRESETS:
+            self._items[("smart", name)] = item(auto, name, ("smart", name))
+        for sp in self.db.smart_playlists():
+            self._items[("smart", sp["id"])] = item(auto, "★ " + sp["name"], ("smart", sp["id"]))
+        self.tree.expandAll()
+        self.tree.setCurrentItem(self._items.get(sel, self._items[("all", None)]))
+        self.tree.blockSignals(False)
+        if sel not in self._items:
+            self.source = ("all", None); self.load_source()
+
+    def _on_source(self):
+        it = self.tree.currentItem()
+        d = it.data(0, Qt.ItemDataRole.UserRole) if it else None
+        if d:
+            self.source = tuple(d); self.load_source()
+
+    def load_source(self):
+        kind, arg = self.source
+        if kind == "all": tracks = self._tracks()
+        elif kind in ("local", "remote"): tracks = self._tracks(kind)
+        elif kind == "queue": tracks = list(self.player.queue)
+        elif kind == "smart": tracks = smart.evaluate(self._tracks(), self._smart_spec(arg))
+        else: tracks = self._playlist_tracks(arg)
+        self.proxy.set_filters(genre=None, artist=None, album=None)
+        self.model.set_tracks(tracks)
+        keep_order = kind in ("queue", "playlist", "smart")
+        self.table.setSortingEnabled(not keep_order)
+        if keep_order:
+            self.proxy.sort(-1)
+        elif self.table.horizontalHeader().sortIndicatorSection() in (0, 1) or not self._sorted_once:
+            self.table.sortByColumn(3, Qt.SortOrder.AscendingOrder); self._sorted_once = True
+        cur = self.player.current
+        self.model.set_playing(cur["id"] if cur else None)
+        self._fill_browser("genre")
+        self._refresh_grid()
+        self._update_status()
+        self._sel_changed()
+
+    def _fill_browser(self, level):
+        order = ["genre", "artist", "album"]
+        for lv in order[order.index(level):]:
+            lw = self.lists[lv]; lw.blockSignals(True); lw.clear()
+            ignore = {"genre": ("genre", "artist", "album"), "artist": ("artist", "album"), "album": ("album",)}[lv]
+            vals = set()
+            for t in self.model.tracks:
+                if self.proxy.matches(t, ignore=ignore):
+                    v = {"genre": t["genre"], "artist": t["album_artist"] or t["artist"], "album": t["album"]}[lv]
+                    if v: vals.add(v)
+            lw.addItem(f"{ALL} ({len(vals)})")
+            lw.addItems(sorted(vals, key=str.lower)); lw.setCurrentRow(0); lw.blockSignals(False)
+
+    def _on_browser(self, name):
+        lw = self.lists[name]
+        v = lw.currentItem().text() if lw.currentRow() > 0 else None
+        self.proxy.set_filters(**{name: v})
+        order = ["genre", "artist", "album"]
+        nxt = order.index(name) + 1
+        for lv in order[nxt:]:
+            self.proxy.set_filters(**{lv: None})
+        if nxt < 3:
+            self._fill_browser(order[nxt])
+        self._update_status()
+
+    def _on_search(self, text):
+        self.proxy.set_filters(text=text)
+        self._fill_browser("genre")
+        self.proxy.set_filters(genre=None, artist=None, album=None)
+        self._refresh_grid()
+        self._update_status()
+
+    def _update_status(self):
+        n = self.proxy.rowCount()
+        dur = sum(self.proxy.sourceModel().tracks[self.proxy.mapToSource(self.proxy.index(r, 0)).row()]["duration"]
+                  for r in range(n))
+        self.status_lbl.setText(f"{n} tracks · {fmt_time(dur)}")
+
+    # ------------------------------------------------------- playback UI
+    def _visible_tracks(self):
+        return [self.model.tracks[self.proxy.mapToSource(self.proxy.index(r, 0)).row()]
+                for r in range(self.proxy.rowCount())]
+
+    def _selected(self):
+        rows = sorted({self.proxy.mapToSource(i).row() for i in self.table.selectionModel().selectedRows()})
+        return [self.model.tracks[r] for r in rows]
+
+    def _on_double(self, idx):
+        if COLUMNS[idx.column()][1] == "rating":
+            return
+        if self.source[0] == "queue":
+            self.player.jump(self.proxy.mapToSource(idx).row()); return
+        self.player.play_list(self._visible_tracks(), idx.row())
+
+    def _play_selected(self):
+        idx = self.table.currentIndex()
+        if idx.isValid(): self._on_double(idx)
+
+    def _on_track(self, t):
+        self.model.set_playing(t["id"] if t else None)
+        self._refresh_next()
+        self.np_panel.set_track(t)
+        if not t:
+            self.setWindowTitle("Hivefi"); self.mini.art.set_art(None); return
+        self._refresh_lyrics()
+        self.setWindowTitle(f'{t["artist"]} – {t["title"]}')
+        self._art_token += 1
+        token, tcopy, api = self._art_token, dict(t), self.api
+        w = Worker(lambda _p: art.get_art(tcopy, api, 440), self)
+        w.done.connect(lambda data, tk=token: self._show_art(data, tk))
+        self._run(w)
+
+    def _show_art(self, data, token):
+        if token != self._art_token: return
+        pm = QPixmap()
+        ok = bool(data) and pm.loadFromData(data)
+        self.np_panel.art.set_art(pm if ok else None)
+        self.mini.art.set_art(pm if ok else None)
+
+    def _on_pos(self, ms):
+        if not self.seek.isSliderDown(): self.seek.setValue(ms)
+        self.lbl_pos.setText(fmt_time(ms / 1000))
+
+    def _on_dur(self, ms):
+        self.seek.setRange(0, ms); self.lbl_dur.setText(fmt_time(ms / 1000))
+
+    def _set_volume(self, v): self.cfg.volume = v; self.player.set_volume(v)
+    def _set_shuffle(self, v): self.cfg.shuffle = v; self.player.set_shuffle(v)
+
+    def _cycle_repeat(self):
+        self.player.set_repeat({"off": "all", "all": "one", "one": "off"}[self.player.repeat])
+        self.cfg.repeat = self.player.repeat; self._update_repeat_label()
+
+    def _update_repeat_label(self):
+        self.btn_repeat.setText({"off": "Repeat: off", "all": "Repeat: all", "one": "Repeat: one"}[self.cfg.repeat])
+
+    # ------------------------------------------------ plays / ratings / stars
+    def _on_played(self, t):
+        self.db.bump_play(t["id"])
+        self.model.update_track(t["id"], play_count=(t.get("play_count") or 0) + 1)
+        t["play_count"] = (t.get("play_count") or 0) + 1
+        if t["source"] == "remote" and self.cfg.scrobble and self.api:
+            self.db.queue_op("scrobble", {"id": t["remote_id"], "time_ms": int(time.time() * 1000)})
+            self._kick_flush()
+
+    def _on_now_playing(self, t):
+        if t["source"] == "remote" and self.cfg.scrobble and self.api:
+            api = self.api
+            w = Worker(lambda _p: api.scrobble(t["remote_id"], submission=False), self)
+            self._run(w)
+
+    def set_rating(self, tracks, r):
+        for t in tracks:
+            self.db.set_rating(t["id"], r); t["rating"] = r
+            self.model.update_track(t["id"], rating=r)
+            if t["source"] == "remote":
+                self.db.queue_op("rating", {"id": t["remote_id"], "rating": r})
+        paths = [t["path"] for t in tracks if t["source"] == "local" and t.get("path")]
+        if self.cfg.write_ratings and paths:
+            def write(_p):
+                bad = 0
+                for p in paths:
+                    try: tagedit.write_rating(p, r)
+                    except Exception: bad += 1
+                return bad
+            w = Worker(write, self)
+            w.done.connect(lambda bad: bad and self.statusBar().showMessage(f"Could not write rating to {bad} file(s)", 5000))
+            self._run(w)
+        self._kick_flush()
+
+    def set_star(self, tracks, on):
+        for t in tracks:
+            self.db.set_starred(t["id"], on); t["starred"] = int(on)
+            self.model.update_track(t["id"], starred=int(on))
+            if t["source"] == "remote":
+                self.db.queue_op("star", {"id": t["remote_id"], "on": on})
+        self._kick_flush()
+
+    # ------------------------------------------------------- menus
+    def _track_menu(self, pos):
+        sel = self._selected()
+        if not sel: return
+        m = QMenu(self)
+        m.addAction("Play Now", lambda: self.player.play_list(sel, 0))
+        m.addAction("Play Next", lambda: self.player.enqueue(sel, next_=True))
+        m.addAction("Queue Last", lambda: self.player.enqueue(sel))
+        m.addSeparator()
+        rm = m.addMenu("Rating")
+        for r in range(6):
+            rm.addAction("★" * r if r else "No rating", lambda r=r: self.set_rating(sel, r))
+        starred = all(t["starred"] for t in sel)
+        m.addAction("Unstar ♥" if starred else "Star ♥", lambda: self.set_star(sel, not starred))
+        pm = m.addMenu("Add to Playlist")
+        pm.addAction("New Playlist…", lambda: self._new_playlist(sel))
+        for p in self.db.playlists():
+            pm.addAction(p["name"], lambda p=p: self._add_to_playlist(p["id"], sel))
+        if self.source[0] == "playlist":
+            m.addAction("Remove from Playlist", lambda: self._remove_from_playlist(sel))
+        local = [t for t in sel if t["source"] == "local"]
+        if local:
+            m.addSeparator()
+            m.addAction("Edit Tags…", lambda: self._edit_tags(local))
+            m.addAction("Show in File Manager",
+                        lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(local[0]["path"]).parent))))
+        m.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _tree_menu(self, pos):
+        it = self.tree.itemAt(pos)
+        d = it.data(0, Qt.ItemDataRole.UserRole) if it else None
+        m = QMenu(self)
+        if d and d[0] == "playlist":
+            pid = d[1]
+            m.addAction("Rename…", lambda: self._rename_playlist(pid))
+            m.addAction("Export as M3U…", lambda: self._export_m3u(pid))
+            m.addAction("Delete", lambda: self._delete_playlist(pid))
+            if self.api:
+                pl = next(p for p in self.db.playlists() if p["id"] == pid)
+                m.addAction("Stop syncing with Navidrome" if pl["sync"] else "Sync with Navidrome",
+                            lambda: self._toggle_playlist_sync(pl))
+        elif d and d == ("remote", None):
+            m.addAction("Turn Navidrome off" if self.cfg.server_enabled else "Turn Navidrome on",
+                        lambda: self.set_library_enabled(Config.NAVIDROME, not self.cfg.server_enabled))
+        elif d and d == ("local", None):
+            for folder in self.cfg.library_dirs:
+                a = m.addAction(folder); a.setCheckable(True); a.setChecked(self.cfg.lib_enabled(folder))
+                a.toggled.connect(lambda on, f=folder: self.set_library_enabled(f, on))
+            if not self.cfg.library_dirs:
+                m.addAction("No folders added (File → Add Folder)").setEnabled(False)
+        elif d and d[0] == "smart" and isinstance(d[1], int):
+            m.addAction("Edit…", lambda: self._edit_smart(d[1]))
+            m.addAction("Delete", lambda: self._delete_smart(d[1]))
+        else:
+            m.addAction("New Playlist…", lambda: self._new_playlist([]))
+            m.addAction("New Auto Playlist…", self._new_smart)
+        m.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _new_playlist(self, tracks):
+        name, ok = QInputDialog.getText(self, "New Playlist", "Name:")
+        if not ok or not name.strip(): return
+        sync_it = 0
+        if self.api:
+            sync_it = int(QMessageBox.question(self, "Sync playlist",
+                          "Sync this playlist with Navidrome?\n(Only server tracks are included on the server.)")
+                          == QMessageBox.StandardButton.Yes)
+        pid = self.db.create_playlist(name.strip(), sync=sync_it, dirty=sync_it)
+        if tracks: self.db.set_playlist_tracks(pid, [t["id"] for t in tracks])
+        self.refresh_playlists()
+        if sync_it: self.sync_now(silent=True)
+
+    def _add_to_playlist(self, pid, tracks):
+        self.db.add_to_playlist(pid, [t["id"] for t in tracks])
+        if self.source == ("playlist", pid): self.load_source()
+        self.statusBar().showMessage(f"Added {len(tracks)} track(s)", 3000)
+        self._sync_if_dirty()
+
+    def _remove_from_playlist(self, tracks):
+        pid = self.source[1]; ids = {t["id"] for t in tracks}
+        self.db.set_playlist_tracks(pid, [t["id"] for t in self.db.playlist_tracks(pid) if t["id"] not in ids])
+        self.load_source(); self._sync_if_dirty()
+
+    def _rename_playlist(self, pid):
+        cur = next(p for p in self.db.playlists() if p["id"] == pid)
+        name, ok = QInputDialog.getText(self, "Rename Playlist", "Name:", text=cur["name"])
+        if ok and name.strip():
+            self.db.rename_playlist(pid, name.strip()); self.refresh_playlists(); self._sync_if_dirty()
+
+    def _delete_playlist(self, pid):
+        if QMessageBox.question(self, "Delete playlist", "Delete this playlist?") == QMessageBox.StandardButton.Yes:
+            self.db.delete_playlist(pid); self.refresh_playlists(); self._kick_flush()
+
+    def _toggle_playlist_sync(self, pl):
+        on = 0 if pl["sync"] else 1
+        self.db.conn.execute("UPDATE playlists SET sync=?, dirty=? WHERE id=?", (on, on, pl["id"]))
+        self.db.commit(); self.refresh_playlists(); self._sync_if_dirty()
+
+    def _sync_if_dirty(self):
+        if self.api and any(p["sync"] and p["dirty"] for p in self.db.playlists()):
+            self.sync_now(silent=True)
+
+    # ------------------------------------------------ equalizer
+    def _init_equalizer(self):
+        mp = self.player.mp
+        self.eq_panel.changed.connect(self._on_eq_changed)
+        self.eq_panel.persist.connect(self.cfg.save)
+        mp.engineChanged.connect(self._engine_changed)
+        self.player.notice.connect(lambda m: self.statusBar().showMessage(m, 12000))
+        self._engine_changed(mp.engine)
+        self.player.configure()
+
+    def _on_eq_changed(self):
+        self.player.configure()
+
+    def _engine_changed(self, e):
+        self.eq_panel.set_status("Audio engine: GStreamer" if e == "gst" else
+                                 "Audio engine: Qt Multimedia (no equalizer, gapless or crossfade)")
+
+    def show_equalizer(self):
+        self.dock_eq.show(); self.dock_eq.raise_()
+
+    # ------------------------------------------------ libraries on/off
+    def _build_lib_menu(self):
+        m = self.lib_menu; m.clear()
+        if self.cfg.server_configured:
+            a = m.addAction("Navidrome / Subsonic server"); a.setCheckable(True); a.setChecked(self.cfg.server_enabled)
+            a.toggled.connect(lambda on: self.set_library_enabled(Config.NAVIDROME, on))
+        for folder in self.cfg.library_dirs:
+            a = m.addAction(folder); a.setCheckable(True); a.setChecked(self.cfg.lib_enabled(folder))
+            a.toggled.connect(lambda on, f=folder: self.set_library_enabled(f, on))
+        if m.isEmpty():
+            m.addAction("No libraries yet (File → Preferences)").setEnabled(False)
+        m.addSeparator()
+        m.addAction("Local music only", self._local_only)
+        m.addAction("Enable all libraries", self._enable_all)
+
+    def _local_only(self):
+        self.cfg.set_lib_enabled(Config.NAVIDROME, False)
+        for d in self.cfg.library_dirs: self.cfg.set_lib_enabled(d, True)
+        self._library_toggled(Config.NAVIDROME, False)
+
+    def _enable_all(self):
+        self.cfg.libraries_off = []
+        self._library_toggled(Config.NAVIDROME, True)
+
+    def set_library_enabled(self, key, on):
+        self.cfg.set_lib_enabled(key, on)
+        self._library_toggled(key, on)
+
+    def _library_toggled(self, key, on):
+        self.cfg.save()
+        self._rebuild_api(); self._apply_sync_timer()
+        self._after_library_change()
+        if key == Config.NAVIDROME and on and self.api:
+            self.sync_now(silent=True)            # catch up on whatever changed while it was off
+        elif key != Config.NAVIDROME and on:
+            self.scan_library(quiet=True)         # pick up files added while the folder was off
+        state = "on" if on else "off"
+        name = "Navidrome" if key == Config.NAVIDROME else key
+        self.statusBar().showMessage(f"Library {name} turned {state}", 5000)
+
+    def _find_duplicates(self):
+        dlg = DuplicatesDialog(self._tracks(), self)
+        if dlg.exec() and dlg.removed:
+            playing = (self.player.current or {}).get("id")
+            ids = [i for i in dlg.removed if i != playing]
+            self.db.delete_tracks(ids)
+            self.refresh_playlists(); self.load_source()
+            self.statusBar().showMessage(f"Removed {len(ids)} duplicate track(s) from the library", 5000)
+
+    def _after_library_change(self):
+        """Drop queued tracks that belong to switched-off libraries, then refresh every view."""
+        P = self.player
+        cur = P.current
+        if cur and not self.cfg.track_enabled(cur):
+            P.clear()
+        elif P.queue:
+            P.remove([i for i, t in enumerate(P.queue) if not self.cfg.track_enabled(t)])
+        self.refresh_playlists(); self.load_source()
+
+    # ------------------------------------------------ panels / views / skins
+    def _dock(self, title, widget, name, area):
+        d = QDockWidget(title, self); d.setObjectName(name); d.setWidget(widget)
+        d.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+                      | QDockWidget.DockWidgetFeature.DockWidgetClosable)
+        self.addDockWidget(area, d)
+        return d
+
+    def _reset_layout(self):
+        self.restoreState(self._default_state)
+        for d in (self.dock_sources, self.dock_np): d.show()
+        for d in (self.dock_next, self.dock_lyrics, self.dock_info, self.dock_eq): d.hide()
+
+    def _refresh_next(self):
+        if self.dock_next.isVisible():
+            self.next_panel.refresh(self.player.queue, self.player.index)
+
+    def _on_queue_changed(self):
+        self._refresh_next()
+        if self.source[0] == "queue": self.load_source()
+
+    def _sel_changed(self):
+        if self.dock_info.isVisible():
+            sel = self._selected()
+            self.info_panel.set_tracks(sel or ([self.player.current] if self.player.current else []))
+
+    def _set_view_mode(self, mode, initial=False):
+        mode = mode if mode in ("browser", "albums") else "browser"
+        self.cfg.view_mode = mode
+        (self.act_albums if mode == "albums" else self.act_browser).setChecked(True)
+        self.top_stack.setCurrentIndex(1 if mode == "albums" else 0)
+        if not initial:
+            total = sum(self.main_split.sizes()) or 780
+            top = int(total * (0.5 if mode == "albums" else 0.25))
+            self.main_split.setSizes([top, total - top])
+        if not initial:
+            self.proxy.set_filters(genre=None, artist=None, album=None)
+            self._fill_browser("genre"); self._refresh_grid(); self._update_status()
+        else:
+            self._refresh_grid()
+
+    def _refresh_grid(self):
+        if self.cfg.view_mode != "albums": return
+        self.grid.set_tracks([t for t in self.model.tracks
+                              if self.proxy.matches(t, ignore=("genre", "artist", "album"))])
+
+    def _on_grid_album(self, artist, album):
+        self.proxy.set_filters(genre=None, artist=artist, album=album); self._update_status()
+
+    def _grid_menu(self, tracks, gpos):
+        m = QMenu(self)
+        m.addAction("Play Album", lambda: self.player.play_list(tracks, 0))
+        m.addAction("Play Next", lambda: self.player.enqueue(tracks, next_=True))
+        m.addAction("Queue Last", lambda: self.player.enqueue(tracks))
+        pm = m.addMenu("Add to Playlist")
+        pm.addAction("New Playlist…", lambda: self._new_playlist(tracks))
+        for p in self.db.playlists():
+            pm.addAction(p["name"], lambda p=p: self._add_to_playlist(p["id"], tracks))
+        m.exec(gpos)
+
+    def _header_menu(self, pos):
+        hh = self.table.horizontalHeader(); m = QMenu(self)
+        for i, (label, key, _w) in enumerate(COLUMNS):
+            if i == 0: continue
+            a = m.addAction(label); a.setCheckable(True); a.setChecked(not self.table.isColumnHidden(i))
+            a.toggled.connect(lambda on, i=i: self.table.setColumnHidden(i, not on))
+        m.exec(hh.mapToGlobal(pos))
+
+    def _on_table_click(self, idx):
+        """Click on the stars in the Rating column to rate (click the current rating again to clear)."""
+        if COLUMNS[idx.column()][1] != "rating": return
+        t = self.model.tracks[self.proxy.mapToSource(idx).row()]
+        x = self.table.viewport().mapFromGlobal(QCursor.pos()).x() - self.table.columnViewportPosition(idx.column())
+        sw = max(8, self.table.fontMetrics().horizontalAdvance("★"))
+        star = 0 if x < 3 else min(5, (x - 3) // sw + 1)
+        self.set_rating([t], 0 if star == t["rating"] else star)
+
+    def _build_skin_menu(self):
+        self.skin_menu.clear(); grp = QActionGroup(self)
+        for name in skins.all_skins():
+            a = self.skin_menu.addAction(name); a.setCheckable(True); a.setChecked(name == self.cfg.skin)
+            grp.addAction(a); a.triggered.connect(lambda _c, n=name: self.set_skin(n))
+        self.skin_menu.addSeparator()
+        self.skin_menu.addAction("Reload Skins", self._build_skin_menu)
+        self.skin_menu.addAction("Open Skins Folder…",
+                                 lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(skins.skins_dir()))))
+
+    def set_skin(self, name):
+        self.cfg.skin = name
+        self.skin_tokens = skins.apply_skin(QApplication.instance(), name)
+        self._apply_skin_visuals()
+
+    def _apply_skin_visuals(self):
+        self.model.playing_color = self.skin_tokens["accent"]
+        self.model.set_playing(self.model.playing_id)
+        self.grid.set_placeholder_color(QColor(self.skin_tokens["button"]))
+        self._refresh_grid()
+
+    # ------------------------------------------------ tray / mini player / sleep
+    def _build_tray(self):
+        self.tray = None
+        if not (self.cfg.show_tray and QSystemTrayIcon.isSystemTrayAvailable()):
+            return
+        icon = QIcon.fromTheme("multimedia-audio-player", self._icon(QStyle.StandardPixmap.SP_MediaPlay))
+        self.tray = QSystemTrayIcon(icon, self); self.tray.setToolTip("Hivefi")
+        m = QMenu()
+        m.addAction("Play/Pause", self.player.toggle); m.addAction("Next", self.player.next)
+        m.addAction("Previous", self.player.previous); m.addSeparator()
+        m.addAction("Show / Hide", self._toggle_visible); m.addAction("Quit", self._quit)
+        self.tray.setContextMenu(m); self._tray_menu = m
+        self.tray.activated.connect(lambda r: r == QSystemTrayIcon.ActivationReason.Trigger and self._toggle_visible())
+        self.tray.show()
+        self.player.trackChanged.connect(lambda t: self.tray.setToolTip(
+            f'{t["artist"]} – {t["title"]}' if t else "Hivefi"))
+
+    def _toggle_visible(self):
+        if self.isVisible() and not self.isMinimized():
+            self.hide()
+        else:
+            self.showNormal(); self.raise_(); self.activateWindow()
+
+    def _quit(self):
+        self._quitting = True; self.close()
+
+    def _enter_mini(self):
+        self.hide(); self.mini.show(); self.mini.set_track(self.player.current)
+
+    def _leave_mini(self):
+        self.mini.hide(); self.showNormal(); self.raise_(); self.activateWindow()
+
+    def _set_sleep(self, minutes):
+        self.sleep_timer.stop()
+        if minutes:
+            self.sleep_timer.start(minutes * 60_000)
+            self.statusBar().showMessage(f"Sleep timer: playback will pause in {minutes} min", 5000)
+
+    def _sleep_fire(self):
+        self.player.mp.pause()
+        for a in self.sleep_group.actions():
+            a.setChecked(a.text() == "Off")
+        self.statusBar().showMessage("Sleep timer: paused playback", 8000)
+
+    # ------------------------------------------------ auto playlists
+    def _smart_spec(self, key):
+        if isinstance(key, str):
+            return smart.PRESETS[key]
+        return next((p["spec"] for p in self.db.smart_playlists() if p["id"] == key), {"rules": []})
+
+    def _new_smart(self):
+        dlg = SmartDialog(self)
+        if dlg.exec():
+            sid = self.db.save_smart(dlg.name.text().strip(), dlg.result_spec())
+            self.source = ("smart", sid); self.refresh_playlists(); self.load_source()
+
+    def _edit_smart(self, sid):
+        cur = next(p for p in self.db.smart_playlists() if p["id"] == sid)
+        dlg = SmartDialog(self, cur["name"], cur["spec"])
+        if dlg.exec():
+            self.db.save_smart(dlg.name.text().strip(), dlg.result_spec(), sid)
+            self.refresh_playlists(); self.load_source()
+
+    def _delete_smart(self, sid):
+        if QMessageBox.question(self, "Delete auto playlist", "Delete this auto playlist?") == QMessageBox.StandardButton.Yes:
+            self.db.delete_smart(sid); self.refresh_playlists()
+
+    # ------------------------------------------------ extra features
+    def _toggle_auto_dj(self, on):
+        self.cfg.auto_dj = on
+        self.player.auto_dj = self._auto_dj_tracks if on else None
+
+    def _set_rg_mode(self, mode):
+        self.cfg.rg_mode = mode; self.cfg.save(); self.player.configure()
+
+    def open_audio_settings(self):
+        dlg = AudioDialog(self.cfg, self.player.mp, self)
+        dlg.on_apply = self.player.configure
+        dlg.exec()
+
+    def _auto_dj_tracks(self, n=10):
+        pool = self.model.tracks if self.source[0] not in ("queue", "playlist") and self.model.tracks \
+            else self._tracks()
+        queued = {t["id"] for t in self.player.queue}
+        fresh = [t for t in pool if t["id"] not in queued] or pool
+        return random.sample(fresh, min(n, len(fresh)))
+
+    def _drop_to_playlist(self, pid, ids):
+        self._add_to_playlist(pid, [{"id": i} for i in ids])
+
+    def _edit_tags(self, tracks):
+        dlg = TagDialog(tracks, self)
+        if not dlg.exec(): return
+        vals = dlg.values()
+        if not vals: return
+        errors = []
+        for t in tracks:
+            try:
+                tagedit.write_tags(t["path"], vals)
+                mtime = Path(t["path"]).stat().st_mtime
+                sets = ", ".join(f"{k}=?" for k in vals) + ", mtime=?"
+                self.db.conn.execute(f"UPDATE tracks SET {sets} WHERE id=?", (*vals.values(), mtime, t["id"]))
+                self.model.update_track(t["id"], **vals)
+            except Exception as e:  # noqa: BLE001
+                errors.append(f'{Path(t["path"]).name}: {e}')
+        self.db.commit()
+        if errors:
+            QMessageBox.warning(self, "Some tags could not be saved", "\n".join(errors[:10]))
+        self._fill_browser("genre")
+
+    def _import_m3u(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Import playlist", "", "Playlists (*.m3u *.m3u8)")
+        if not path: return
+        base = Path(path).parent
+        by_path = {t["path"]: t["id"] for t in self.db.all_tracks("local")}
+        ids, missing = [], 0
+        for line in Path(path).read_text(errors="replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"): continue
+            f = Path(line) if Path(line).is_absolute() else base / line
+            tid = by_path.get(str(f)) or by_path.get(str(f.resolve()))
+            if tid: ids.append(tid)
+            else: missing += 1
+        pid = self.db.create_playlist(Path(path).stem)
+        self.db.set_playlist_tracks(pid, ids)
+        self.refresh_playlists()
+        self.statusBar().showMessage(f"Imported {len(ids)} tracks ({missing} not in library)", 6000)
+
+    def _export_m3u(self, pid):
+        pl = next(p for p in self.db.playlists() if p["id"] == pid)
+        path, _ = QFileDialog.getSaveFileName(self, "Export playlist", pl["name"] + ".m3u8", "Playlists (*.m3u8)")
+        if not path: return
+        lines = ["#EXTM3U"]
+        for t in self.db.playlist_tracks(pid):
+            if t["source"] == "local":
+                lines += [f'#EXTINF:{int(t["duration"])},{t["artist"]} - {t["title"]}', t["path"]]
+        Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.statusBar().showMessage("Exported local tracks (server tracks have no file path)", 6000)
+
+    def show_lyrics(self):
+        self.dock_lyrics.show(); self.dock_lyrics.raise_()
+        self._refresh_lyrics()
+
+    def _refresh_lyrics(self):
+        if not self.dock_lyrics.isVisible(): return
+        t = self.player.current
+        if not t:
+            self.lyrics_panel.show_lyrics("", ""); return
+        tc, api = dict(t), self.api
+        title = f'{t["artist"]} – {t["title"]}'
+        self.lyrics_panel.show_lyrics(title, "Loading…")
+        w = Worker(lambda _p: lyrics.find_lyrics(tc, api), self)
+        w.done.connect(lambda txt, tid=t["id"]: self.player.current and self.player.current["id"] == tid
+                       and self.lyrics_panel.show_lyrics(title, txt))
+        self._run(w)
+
+    # --------------------------------------------------- background jobs
+    def _run(self, w: Worker):
+        self._workers.add(w)
+        w.finished.connect(lambda: self._workers.discard(w))
+        w.start()
+
+    def _startup(self):
+        if self.cfg.library_dirs and not self.db.all_tracks("local"):
+            self.scan_library()
+        elif self.cfg.library_dirs:
+            self.scan_library(quiet=True)
+        if self.api and self.cfg.sync_on_start:
+            self.sync_now(silent=True)
+        if self.cfg.check_updates and not os.environ.get("HIVEFI_NO_UPDATE_CHECK"):
+            self.check_updates()
+
+    # --------------------------------------------------- self-update
+    def check_updates(self, manual=False):
+        w = Worker(lambda _p: updater.check(self.cfg), self)
+        w.done.connect(lambda remote: self._update_found(remote, manual))
+        w.failed.connect(lambda msg: manual and QMessageBox.warning(self, "Updates", f"Update check failed: {msg}"))
+        self._run(w)
+
+    def _update_found(self, remote, manual):
+        if not remote:
+            if manual:
+                QMessageBox.information(self, "Updates", "You are running the latest version.")
+            return
+        a = QMessageBox.question(self, "Update available",
+                                 f"A newer version ({remote[:7]}) is available on GitHub.\n\n"
+                                 "Download it and restart now?")
+        if a != QMessageBox.StandardButton.Yes:
+            return
+        self.statusBar().showMessage("Downloading update…")
+        w = Worker(lambda _p: updater.apply(self.cfg, remote=remote), self)
+        w.done.connect(self._update_installed)
+        w.failed.connect(lambda msg: QMessageBox.warning(self, "Update failed", msg))
+        self._run(w)
+
+    def _update_installed(self, _ver):
+        self.restart_requested = True
+        self._quit()
+
+    def _apply_sync_timer(self):
+        self.sync_timer.stop()
+        if self.cfg.server_enabled and self.cfg.sync_interval_min > 0:
+            self.sync_timer.start(self.cfg.sync_interval_min * 60_000)
+
+    def _add_folder(self):
+        d = QFileDialog.getExistingDirectory(self, "Add music folder")
+        if d and d not in self.cfg.library_dirs:
+            self.cfg.library_dirs.append(d); self.cfg.save(); self.scan_library()
+
+    def scan_library(self, quiet=False):
+        if self._scan_worker and self._scan_worker.isRunning(): return
+        dirs = list(self.cfg.library_dirs)
+        if not dirs:
+            if not quiet: self.open_settings()
+            return
+        db = self.db
+        skip = list(self.cfg.disabled_dirs)
+        w = Worker(lambda prog: scanner.scan(db, dirs, lambda i, n: prog(f"Scanning {i}/{n}"), skip=skip), self)
+        w.progress.connect(lambda m: self.sync_lbl.setText(m))
+        def done(res):
+            self.sync_lbl.setText(f"Library: {res[0]} updated, {res[1]} removed")
+            self.load_source()
+        w.done.connect(done)
+        w.failed.connect(lambda e: self.sync_lbl.setText(f"Scan failed: {e}"))
+        self._scan_worker = w; self._run(w)
+
+    def sync_now(self, silent=False):
+        if not self.api:
+            if not silent:
+                if self.cfg.server_configured:
+                    QMessageBox.information(self, "Navidrome is off",
+                                            "The Navidrome library is switched off. Turn it on under View → Libraries.")
+                else:
+                    self.open_settings()
+            return
+        if self._sync_worker and self._sync_worker.isRunning(): return
+        api, db = self.api, self.db
+        w = Worker(lambda prog: sync.full_sync(db, api, prog), self)
+        w.progress.connect(lambda m: self.sync_lbl.setText("☁ " + m))
+        def done(r):
+            self.sync_lbl.setText(f"☁ Synced {time.strftime('%H:%M')} · {r['songs']} songs")
+            self.refresh_playlists(); self.load_source()
+        def failed(e):
+            self.sync_lbl.setText(f"☁ Sync failed: {e}")
+            if not silent: QMessageBox.warning(self, "Sync failed", e)
+        w.done.connect(done); w.failed.connect(failed)
+        self._sync_worker = w; self._run(w)
+
+    def _kick_flush(self):
+        if not self.api or (self._flush_worker and self._flush_worker.isRunning()): return
+        api, db = self.api, self.db
+        w = Worker(lambda _p: sync.flush_ops(db, api), self)
+        self._flush_worker = w; self._run(w)
+
+    def open_settings(self):
+        dlg = SettingsDialog(self.cfg, self)
+        if dlg.exec():
+            dlg.apply(); self._rebuild_api(); self._apply_sync_timer()
+            self._after_library_change()
+            self.scan_library(quiet=True)
+            if self.api: self.sync_now(silent=True)
+
+    def closeEvent(self, e):
+        if self.cfg.close_to_tray and self.tray and self.tray.isVisible() and not self._quitting:
+            self.hide(); e.ignore(); return
+        self.cfg.geometry = bytes(self.saveGeometry().toBase64()).decode()
+        self.cfg.state = bytes(self.saveState().toBase64()).decode()
+        self.cfg.header_state = bytes(self.table.horizontalHeader().saveState().toBase64()).decode()
+        self.cfg.save()
+        if self.tray: self.tray.hide()
+        self.mini.hide()
+        self.player.mp.shutdown()
+        self.player.stop()
+        for w in list(self._workers): w.wait(2000)
+        super().closeEvent(e)
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("hivefi"); app.setDesktopFileName("hivefi")
+    cfg = Config.load()
+    skins.apply_skin(app, cfg.skin)
+    db = Database(data_dir() / "library.db")
+    win = MainWindow(cfg, db)
+    win.show()
+    code = app.exec()
+    if win.restart_requested:                       # update installed: relaunch the new code
+        os.chdir(updater.ROOT)
+        os.execv(sys.executable, [sys.executable, "-m", "hivefi", *sys.argv[1:]])
+    sys.exit(code)

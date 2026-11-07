@@ -1,0 +1,23 @@
+# Maintainer: you
+pkgname=hivefi
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Music manager and player with Navidrome/Subsonic sync'
+arch=(any)
+license=(custom)
+depends=(python python-pyqt6 python-mutagen python-requests python-gobject gst-python
+         gst-plugins-base gst-plugins-good gst-plugins-bad qt6-multimedia-ffmpeg)
+optdepends=('gst-libav: more audio formats' 'gst-plugins-ugly: more audio formats')
+makedepends=(python-build python-installer python-setuptools python-wheel)
+source=()
+
+build() {
+  cd "$startdir/../.."
+  python -m build --wheel --no-isolation --outdir "$srcdir/dist"
+}
+
+package() {
+  cd "$startdir/../.."
+  python -m installer --destdir="$pkgdir" "$srcdir"/dist/*.whl
+  install -Dm644 data/hivefi.desktop "$pkgdir/usr/share/applications/hivefi.desktop"
+}
