@@ -4,6 +4,7 @@ from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QAbstractItemView, QListView, QListWidget, QListWidgetItem, QToolTip
 
 from .. import art
+from ..albums import title_of
 from .panels import BORDER, border_color, with_border
 
 ICON = 150
@@ -35,7 +36,7 @@ def _placeholder(color: QColor, frame: QColor):
 
 
 class AlbumGrid(QListWidget):
-    albumSelected = pyqtSignal(object, object)       # (artist, album) or (None, None)
+    albumSelected = pyqtSignal(object)               # the album's tracks, or None when nothing is selected
     playRequested = pyqtSignal(list)
     contextRequested = pyqtSignal(list, object)      # tracks, global pos
 
@@ -68,12 +69,13 @@ class AlbumGrid(QListWidget):
 
     def set_tracks(self, tracks):
         self._gen += 1; self._requested.clear()
-        groups: dict[tuple, list] = {}
-        for t in tracks:
-            groups.setdefault(((t["album_artist"] or t["artist"]), t["album"]), []).append(t)
+        groups: dict[str, list] = {}
+        for t in tracks:                               # albums = title + album artist (see hivefi.albums)
+            groups.setdefault(t.get("_ak") or f"{t['album_artist'] or t['artist']}\x1f{t['album']}", []).append(t)
         self.blockSignals(True); self.clear(); self.albums = {}; self._items = {}
-        for (artist, album), ts in sorted(groups.items(), key=lambda kv: (kv[0][0].lower(), kv[0][1].lower())):
-            key = f"{artist}\x00{album}"
+        named = [(key, ts, title_of(ts), ts[0].get("_aa") or ts[0]["album_artist"] or ts[0]["artist"])
+                 for key, ts in groups.items()]
+        for key, ts, album, artist in sorted(named, key=lambda g: (g[3].lower(), g[2].lower())):
             self.albums[key] = ts                      # track order is sorted on demand (album_tracks)
             it = QListWidgetItem(self.placeholder, f"{album}\n{artist}")
             it.setData(KEY, key)
@@ -90,7 +92,7 @@ class AlbumGrid(QListWidget):
             it = self.itemAt(e.pos())
             ts = self.albums.get(it.data(KEY)) if it else None
             if ts:
-                QToolTip.showText(e.globalPos(), f"{ts[0]['album']} — {ts[0]['album_artist'] or ts[0]['artist']}\n"
+                QToolTip.showText(e.globalPos(), f"{title_of(ts)} — {ts[0].get('_aa') or ts[0]['artist']}\n"
                                                  f"{len(ts)} tracks", self)
             else:
                 QToolTip.hideText()
@@ -99,10 +101,10 @@ class AlbumGrid(QListWidget):
 
     def selected_album(self):
         it = self.currentItem()
-        return tuple(it.data(KEY).split("\x00")) if it and it.isSelected() else (None, None)
+        return self.album_tracks(it) if it and it.isSelected() else None
 
     def _sel(self):
-        self.albumSelected.emit(*self.selected_album())
+        self.albumSelected.emit(self.selected_album())
 
     def _ctx(self, pos):
         it = self.itemAt(pos)

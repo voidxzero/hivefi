@@ -4,6 +4,8 @@ import sqlite3
 import threading
 import time
 
+from . import albums
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tracks(
   id INTEGER PRIMARY KEY,
@@ -40,7 +42,8 @@ CREATE TABLE IF NOT EXISTS smart_playlists(id INTEGER PRIMARY KEY, name TEXT NOT
 """
 
 TRACK_COLS = ("title artist album_artist album genre year track_no disc_no duration "
-              "bitrate suffix size rating starred play_count last_played mtime cover_id rg_gain folder_id").split()
+              "bitrate suffix size rating starred play_count last_played mtime cover_id rg_gain folder_id "
+              "album_id aa_tag").split()
 
 
 class Database:
@@ -59,6 +62,11 @@ class Database:
             self.conn.commit()
         if "folder_id" not in cols:   # migration: which Subsonic music folder (library) a server track came from
             self.conn.execute("ALTER TABLE tracks ADD COLUMN folder_id TEXT")
+            self.conn.commit()
+        if "album_id" not in cols:    # migration: album identity (server album id, raw album-artist tag)
+            self.conn.execute("ALTER TABLE tracks ADD COLUMN album_id TEXT")
+            self.conn.execute("ALTER TABLE tracks ADD COLUMN aa_tag TEXT")
+            self.conn.execute("UPDATE tracks SET mtime=0 WHERE source='local'")      # re-read tags once
             self.conn.commit()
 
     @property
@@ -141,6 +149,7 @@ class Database:
             cur.execute("SELECT * FROM tracks")
             cols = [d[0] for d in cur.description]
             rows = [dict(zip(cols, r)) for r in cur]
+            albums.annotate(rows)                          # album artist + album key of every track
         else:
             rows = [t for t in self.all_tracks(None) if t["source"] == source]
         with self._cache_lock:

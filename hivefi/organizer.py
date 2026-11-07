@@ -19,7 +19,7 @@ def render(t: dict, pattern=DEFAULT_PATTERN) -> str:
     """Relative path (without extension) for a track dict."""
     multi = (t.get("disc_no") or 0) > 1
     vals = {
-        "albumartist": clean(t.get("album_artist") or t.get("artist")) or "Unknown Artist",
+        "albumartist": clean(t.get("_aa") or t.get("album_artist") or t.get("artist")) or "Unknown Artist",
         "artist": clean(t.get("artist")) or "Unknown Artist",
         "album": clean(t.get("album")) or "Unknown Album",
         "title": clean(t.get("title")) or "Untitled",

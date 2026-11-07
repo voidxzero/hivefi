@@ -51,6 +51,7 @@ class TrackModel(QAbstractTableModel):
         self.playing_id = None
         self.text = ""
         self.genre = self.artist = self.album = None
+        self.ids: set | None = None
         self.sort_col: str | None = None
         self.sort_desc = False
         self._rows: dict | None = None        # track id -> row, built lazily
@@ -106,7 +107,7 @@ class TrackModel(QAbstractTableModel):
                 self._base_prev, self._base_words = rows, words
         return self._base
 
-    def set_filters(self, text=None, genre="keep", artist="keep", album="keep"):
+    def set_filters(self, text=None, genre="keep", artist="keep", album="keep", ids="keep"):
         if text is not None and text.lower() != self.text:
             self.text = text.lower(); self._base = None
             if not self.text.split():
@@ -114,11 +115,16 @@ class TrackModel(QAbstractTableModel):
         if genre != "keep": self.genre = genre
         if artist != "keep": self.artist = artist
         if album != "keep": self.album = album
+        if ids != "keep":
+            self.ids = ids
+        elif text is not None or "keep" != genre or "keep" != artist or "keep" != album:
+            self.ids = None                                  # any other filter replaces "this one album"
         self._refilter()
 
     @staticmethod
     def artist_of(t):
-        return t["album_artist"] or t["artist"]
+        """The album artist the browser groups by (see albums.annotate)."""
+        return t.get("_aa") or t["album_artist"] or t["artist"]
 
     def narrowed(self, upto="album"):
         """Base list narrowed by the browser filters above `upto` ('genre' = none, 'artist' = genre, 'album' = both)."""
@@ -128,7 +134,7 @@ class TrackModel(QAbstractTableModel):
             rows = [t for t in rows if t["genre"] == g]
         if upto == "album" and self.artist:
             a = self.artist
-            rows = [t for t in rows if (t["album_artist"] or t["artist"]) == a]
+            rows = [t for t in rows if (t.get("_aa") or t["album_artist"] or t["artist"]) == a]
         return rows
 
     def _refilter(self):
@@ -136,6 +142,9 @@ class TrackModel(QAbstractTableModel):
         if self.album:
             al = self.album
             rows = [t for t in rows if t["album"] == al]
+        if self.ids is not None:                              # one album picked in the Albums grid
+            ids = self.ids
+            rows = [t for t in rows if t["id"] in ids]
         self.beginResetModel()
         self.tracks = rows if rows is not self.all else list(rows)
         self._rows = None

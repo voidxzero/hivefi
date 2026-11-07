@@ -75,7 +75,8 @@ def scan_tracks(db, tracks, progress=None, by_album=True):
     groups: dict = {}
     for t in local:
         if t["id"] in results:
-            groups.setdefault((t.get("album_artist") or t.get("artist"), t.get("album")) if by_album else t["id"],
+            groups.setdefault((t.get("_ak") or (t.get("album_artist") or t.get("artist"), t.get("album")))
+                              if by_album else t["id"],
                               []).append(t)
     done = 0
     for g in groups.values():

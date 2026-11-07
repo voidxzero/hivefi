@@ -5,13 +5,13 @@ import sys
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QByteArray, QSize, Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QByteArray, QEventLoop, QSize, Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import (QAction, QActionGroup, QColor, QCursor, QDesktopServices, QIcon, QKeySequence, QPixmap,
                          QShortcut)
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget, QFileDialog, QInputDialog, QLabel,
                              QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox, QPushButton, QSlider,
                              QSplitter, QStackedWidget, QStyle, QSystemTrayIcon, QTableView, QToolBar,
-                             QTreeWidget, QTreeWidgetItem)
+                             QTreeWidget, QTreeWidgetItem, QWidget)
 
 from .. import art, scanner, sync
 from ..config import Config, data_dir
@@ -27,7 +27,7 @@ from .duplicates_dialog import DuplicatesDialog
 from .tools_dialogs import ConvertDialog, MissingDialog, OrganizeDialog, ReplayGainDialog
 from .equalizer import EqualizerPanel
 from .mini import MiniPlayer
-from .panels_mixin import PanelsMixin
+from .panels_mixin import STATE_VERSION, PanelsMixin
 from .seekbar import STYLES as SEEK_STYLES
 from .visualizer import STYLES as VIS_STYLES
 from .models import COLUMNS, DEFAULT_HIDDEN, MIME, TrackModel, fmt_time
@@ -114,11 +114,15 @@ class MainWindow(PanelsMixin, QMainWindow):
         self.mini.restoreRequested.connect(self._leave_mini)
         self._build_tray()
         self._init_equalizer()
-        self._default_state = self.saveState()
+        self._default_state = self.saveState(STATE_VERSION)
+        self._first_run = not cfg.state
         if cfg.geometry:
             self.restoreGeometry(QByteArray.fromBase64(cfg.geometry.encode()))
+        if cfg.tracks_detached:                                  # the table was in its own panel when last closed
+            self._set_tracks_detached(True, show=False)
         if cfg.state:
-            self.restoreState(QByteArray.fromBase64(cfg.state.encode()))
+            self.restoreState(QByteArray.fromBase64(cfg.state.encode()), STATE_VERSION)
+            self._sync_tracks_slot()
         if cfg.header_state:
             self.table.horizontalHeader().restoreState(QByteArray.fromBase64(cfg.header_state.encode()))
             self._sorted_once = True
@@ -135,9 +139,21 @@ class MainWindow(PanelsMixin, QMainWindow):
         self.refresh_playlists()
         self.status_lbl.setText("Loading library…")
         w = Worker(lambda _p: len(self.db.all_tracks()), self)       # fill the track cache off the UI thread
-        w.done.connect(lambda _n: (self._restore_session(), self._startup()))
-        w.failed.connect(lambda _e: (self.load_source(), self._startup()))
+        w.done.connect(lambda _n: (self._restore_session(), self._startup(), self._after_first_load()))
+        w.failed.connect(lambda _e: (self.load_source(), self._startup(), self._after_first_load()))
         self._run(w)
+
+    def _after_first_load(self):
+        if self._first_run:                       # no saved layout: size the panels once the content is in
+            self._first_run = False
+            QTimer.singleShot(100, self._size_default_docks)
+
+    def _size_default_docks(self):
+        """First-run proportions (needs a laid-out window): a compact browser above the track list, and the two
+        side panels sharing the left column."""
+        O = Qt.Orientation
+        self.resizeDocks([self.dock_browser], [190], O.Vertical)
+        self.resizeDocks([self.dock_sources, self.dock_np], [330, 300], O.Vertical)
 
     # ------------------------------------------------------------ setup
     def _rebuild_api(self):
@@ -215,9 +231,17 @@ class MainWindow(PanelsMixin, QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_Return), self.table, self._play_selected,
                   context=Qt.ShortcutContext.WidgetShortcut)
 
-        self.main_split = main = QSplitter(Qt.Orientation.Vertical)
-        main.addWidget(self.top_stack); main.addWidget(self.table); main.setSizes([190, 600])
-        self.setCentralWidget(main)
+        # The library browser is a panel. The track list lives in the central area and can be popped out into its own
+        # panel (Edit Mode shows a button for it, or View → Panels → Track List) that moves like any other.
+        self.setDockNestingEnabled(True)
+        self.top_stack.setMinimumHeight(110); self.table.setMinimumHeight(80)
+        self.setCorner(Qt.Corner.TopLeftCorner, Qt.DockWidgetArea.LeftDockWidgetArea)
+        self.setCorner(Qt.Corner.BottomLeftCorner, Qt.DockWidgetArea.LeftDockWidgetArea)
+        self.setCorner(Qt.Corner.TopRightCorner, Qt.DockWidgetArea.RightDockWidgetArea)
+        self.setCorner(Qt.Corner.BottomRightCorner, Qt.DockWidgetArea.RightDockWidgetArea)
+        self.dock_browser = self._dock("Library Browser", self.top_stack, "dock_browser",
+                                       Qt.DockWidgetArea.TopDockWidgetArea)
+        self._build_track_list_slot()
 
         # dockable panels
         self.np_panel = NowPlayingPanel(); self.next_panel = UpNextPanel()
@@ -293,9 +317,12 @@ class MainWindow(PanelsMixin, QMainWindow):
         v.addSeparator()
         self.lib_menu = v.addMenu("Libraries"); self.lib_menu.aboutToShow.connect(self._build_lib_menu)
         pm = v.addMenu("Panels")
-        for d in (self.dock_sources, self.dock_np, self.dock_next, self.dock_lyrics, self.dock_info, self.dock_eq,
-                  self.dock_vis):
+        for d in (self.dock_sources, self.dock_browser, self.dock_np, self.dock_next, self.dock_lyrics,
+                  self.dock_info, self.dock_eq, self.dock_vis):
             pm.addAction(d.toggleViewAction())
+        self.act_tracks_panel = pm.addAction("Track List (pop out)"); self.act_tracks_panel.setCheckable(True)
+        self.act_tracks_panel.setChecked(self.tracks_detached)
+        self.act_tracks_panel.toggled.connect(self._set_tracks_detached)
         pm.addSeparator()
         for tb in self.toolbars:
             pm.addAction(tb.toggleViewAction())
@@ -315,7 +342,9 @@ class MainWindow(PanelsMixin, QMainWindow):
         for key, label in VIS_STYLES.items():
             a = vm.addAction(label); a.setCheckable(True); a.setChecked(key == self.cfg.vis_style); vg.addAction(a)
             a.triggered.connect(lambda _c, k=key: self._set_vis_style(k))
-        vm.addSeparator(); vm.addAction("Show Visualizer", self.dock_vis.show)
+        vm.addSeparator()
+        cm = vm.addMenu("Colors"); cm.aboutToShow.connect(lambda: self.vis.fill_colors_menu(cm))
+        vm.addAction("Show Visualizer", self.dock_vis.show)
         v.addAction("Columns View", lambda: self._set_view_mode("browser"))
         v.addAction("Albums View", lambda: self._set_view_mode("albums"))
         self.skin_menu = v.addMenu("Skin"); self._build_skin_menu()
@@ -406,7 +435,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         else: tracks = self._playlist_tracks(arg)
         m = self.model
         saved = (m.genre, m.artist, m.album) if keep else (None, None, None)
-        m.genre = m.artist = m.album = None
+        m.genre = m.artist = m.album = m.ids = None
         hh = self.table.horizontalHeader()
         if kind in ("queue", "playlist", "smart"):               # these keep their own order
             hh.setSortIndicatorShown(False)
@@ -443,7 +472,7 @@ class MainWindow(PanelsMixin, QMainWindow):
             lw = self.lists[lv]; lw.blockSignals(True); lw.setUpdatesEnabled(False); lw.clear()
             rows = self.model.narrowed(lv)
             if lv == "genre": vals = {t["genre"] for t in rows}
-            elif lv == "artist": vals = {t["album_artist"] or t["artist"] for t in rows}
+            elif lv == "artist": vals = {t.get("_aa") or t["album_artist"] or t["artist"] for t in rows}
             else: vals = {t["album"] for t in rows}
             vals.discard("")
             lw.addItem(f"{ALL} ({len(vals)})")
@@ -924,10 +953,10 @@ class MainWindow(PanelsMixin, QMainWindow):
         self.cfg.view_mode = mode
         (self.act_albums if mode == "albums" else self.act_browser).setChecked(True)
         self.top_stack.setCurrentIndex(1 if mode == "albums" else 0)
-        if not initial:
-            total = sum(self.main_split.sizes()) or 780
+        if not initial and self.dock_browser.isVisible() and not self.dock_browser.isFloating():
+            total = (self.dock_browser.height() + self.central_box.height()) or 780
             top = int(total * (0.5 if mode == "albums" else 0.25))
-            self.main_split.setSizes([top, total - top])
+            self.resizeDocks([self.dock_browser], [top], Qt.Orientation.Vertical)
         if not initial:
             self.model.set_filters(genre=None, artist=None, album=None)
             self._fill_browser("genre"); self._refresh_grid(); self._update_status()
@@ -938,8 +967,10 @@ class MainWindow(PanelsMixin, QMainWindow):
         if self.cfg.view_mode != "albums": return
         self.grid.set_tracks(self.model.base())
 
-    def _on_grid_album(self, artist, album):
-        self.model.set_filters(genre=None, artist=artist, album=album); self._update_status()
+    def _on_grid_album(self, tracks):
+        """An album was picked in the grid: show exactly its tracks (None = back to all)."""
+        self.model.set_filters(genre=None, artist=None, album=None, ids={t["id"] for t in tracks} if tracks else None)
+        self._update_status()
 
     def _grid_menu(self, tracks, gpos):
         m = QMenu(self)
@@ -1102,15 +1133,18 @@ class MainWindow(PanelsMixin, QMainWindow):
             try:
                 tagedit.write_tags(t["path"], vals)
                 mtime = Path(t["path"]).stat().st_mtime
-                sets = ", ".join(f"{k}=?" for k in vals) + ", mtime=?"
-                self.db.conn.execute(f"UPDATE tracks SET {sets} WHERE id=?", (*vals.values(), mtime, t["id"]))
+                dbv = dict(vals)
+                if "album_artist" in vals:
+                    dbv["aa_tag"] = vals["album_artist"]             # an edited album artist is an explicit tag now
+                sets = ", ".join(f"{k}=?" for k in dbv) + ", mtime=?"
+                self.db.conn.execute(f"UPDATE tracks SET {sets} WHERE id=?", (*dbv.values(), mtime, t["id"]))
                 self.model.update_track(t["id"], **vals)
             except Exception as e:  # noqa: BLE001
                 errors.append(f'{Path(t["path"]).name}: {e}')
         self.db.commit()
         if errors:
             QMessageBox.warning(self, "Some tags could not be saved", "\n".join(errors[:10]))
-        self._fill_browser("genre")
+        self.load_source(keep=True)                              # the commit dropped the cached tracks: album grouping may change
 
     def _import_m3u(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import playlist", "", "Playlists (*.m3u *.m3u8)")

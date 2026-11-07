@@ -98,11 +98,13 @@ class Config:
     vis_enabled: bool = True             # put spectrum/level analysers in the audio chain (about 1% CPU)
     vis_active: bool = False             # runtime only: a visualizer panel is visible
     vis_bars: int = 48
+    vis_colors: str = "skin"             # colour scheme name (see ui/visualizer.SCHEMES)
+    vis_custom: list = field(default_factory=lambda: ["#7a1fd8", "#ff4fb8", "#ffe14a"])   # custom low/mid/peak
     vis_peaks: bool = True
     layouts: dict = field(default_factory=dict)       # name -> saved window layout (base64)
-    split_state: str = ""                # main splitter (browser | table)
     browser_state: str = ""              # Genre | Artist | Album splitter
     resume_mode: str = "paused"          # off | paused | play: what to do with last session's queue on start
+    tracks_detached: bool = False        # the track list was popped out into its own panel
     check_updates: bool = True           # look for a newer version on GitHub at startup
     github_token: str = ""               # optional; needed to update from a private repo (else `gh auth token`)
 

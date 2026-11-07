@@ -1,0 +1,171 @@
+"""Albums are title + album artist: compilations stay whole, same-named albums stay apart."""
+import os
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+import shutil
+import sqlite3
+import subprocess
+
+import pytest
+
+from hivefi import albums, scanner, sync
+from hivefi.db import Database
+from hivefi.subsonic import Subsonic
+from tests.mock_server import State, make_server
+
+
+def T(i, **kw):
+    base = dict(id=i, source="local", album="Hits", artist="A", album_artist="A", aa_tag="", title=f"t{i}",
+                path=f"/m/x/{i}.mp3", album_id=None, disc_no=1, track_no=i, genre="", duration=1.0, starred=0)
+    base.update(kw)
+    return base
+
+
+def groups(ts):
+    albums.annotate(ts)
+    out = {}
+    for t in ts:
+        out.setdefault(t["_ak"], []).append(t)
+    return out
+
+
+def test_compilation_without_album_artist_stays_one_album():
+    ts = [T(1, artist="X", album_artist="X"), T(2, artist="Y", album_artist="Y"), T(3, artist="Z", album_artist="Z")]
+    g = groups(ts)
+    assert len(g) == 1 and {t["_aa"] for t in ts} == {albums.VARIOUS}
+
+
+def test_single_artist_album_without_tag_uses_that_artist():
+    ts = [T(1, artist="Solo"), T(2, artist="Solo"), T(3, artist="solo ")]
+    assert len(groups(ts)) == 1 and {t["_aa"] for t in ts} == {"Solo"}
+
+
+def test_same_title_in_different_folders_is_two_albums():
+    ts = [T(1, artist="One", path="/m/one/1.mp3"), T(2, artist="Two", path="/m/two/2.mp3")]
+    g = groups(ts)
+    assert len(g) == 2 and {t["_aa"] for t in ts} == {"One", "Two"}
+
+
+def test_disc_folders_and_titles_merge():
+    ts = [T(1, path="/m/alb/CD 1/1.mp3"), T(2, path="/m/alb/Disc 2/2.mp3"), T(3, path="/m/alb/cd3/3.mp3")]
+    assert len(groups(ts)) == 1
+    ts = [T(1, album="Epic (Disc 1)", path="/m/a/1.mp3"), T(2, album="Epic [CD2]", path="/m/a/2.mp3"),
+          T(3, album="Epic", path="/m/a/3.mp3")]
+    assert len(groups(ts)) == 1
+    assert albums.title_of(ts) in ("Epic (Disc 1)", "Epic [CD2]", "Epic")
+
+
+def test_album_artist_tag_wins_and_pulls_in_untagged_tracks():
+    ts = [T(1, aa_tag="The Band", artist="The Band"), T(2, aa_tag="", artist="The Band feat. Guest"),
+          T(3, aa_tag="The Band", artist="The Band")]
+    g = groups(ts)
+    assert len(g) == 1 and {t["_aa"] for t in ts} == {"The Band"}
+
+
+def test_tag_groups_span_folders_but_different_tags_split():
+    ts = [T(1, aa_tag="Band", path="/m/a/1.mp3"), T(2, aa_tag="band", path="/m/b/2.mp3")]
+    assert len(groups(ts)) == 1                               # same title + same album artist, wherever the files are
+    ts = [T(1, aa_tag="Alpha"), T(2, aa_tag="Beta"), T(3, aa_tag="Alpha")]
+    g = groups(ts)
+    assert len(g) == 2 and sorted(len(v) for v in g.values()) == [1, 2]    # one folder, two artists' "Hits"
+
+
+def test_server_albums_follow_album_id():
+    ts = [T(1, source="remote", path=None, album_id="9", artist="X"), T(2, source="remote", path=None, album_id="9", artist="Y"),
+          T(3, source="remote", path=None, album_id="10", artist="X")]
+    g = groups(ts)
+    assert len(g) == 2
+    assert {t["_aa"] for t in ts if t["album_id"] == "9"} == {albums.VARIOUS}
+    ts = [T(1, source="remote", path=None, album_id="9", artist="X", aa_tag="Host"),
+          T(2, source="remote", path=None, album_id="9", artist="Y", aa_tag="Host")]
+    groups(ts); assert {t["_aa"] for t in ts} == {"Host"}
+
+
+def test_annotate_is_repeatable():
+    ts = [T(1, artist="X"), T(2, artist="Y")]
+    albums.annotate(ts); first = [(t["_ak"], t["_aa"]) for t in ts]
+    albums.annotate(ts); assert [(t["_ak"], t["_aa"]) for t in ts] == first
+    assert all("_tag" not in t for t in ts)
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg needed")
+def test_scan_keeps_compilations_together(tmp_path):
+    m = tmp_path / "music"; (m / "Mix").mkdir(parents=True); (m / "Solo").mkdir()
+    def mk(path, **tags):
+        cmd = ["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "sine=d=1"]
+        for k, v in tags.items():
+            cmd += ["-metadata", f"{k}={v}"]
+        subprocess.run(cmd + [str(path)], check=True)
+    for i, a in enumerate("XYZ"):
+        mk(m / "Mix" / f"{i}.flac", title=f"s{i}", artist=a, album="Mixtape")
+    for i in range(2):
+        mk(m / "Solo" / f"{i}.flac", title=f"o{i}", artist="Band" if i == 0 else "Band feat. Guest", album="Solo",
+           album_artist="Band")
+    db = Database(tmp_path / "l.db")
+    scanner.scan(db, [str(m)])
+    ts = db.all_tracks("local")
+    by_album = {}
+    for t in ts:
+        by_album.setdefault(t["_ak"], []).append(t)
+    assert len(by_album) == 2
+    assert sorted(len(v) for v in by_album.values()) == [2, 3]
+    mix = next(v for v in by_album.values() if len(v) == 3)
+    assert {t["_aa"] for t in mix} == {albums.VARIOUS} and all(t["aa_tag"] == "" for t in mix)
+    solo = next(v for v in by_album.values() if len(v) == 2)
+    assert {t["_aa"] for t in solo} == {"Band"} and {t["aa_tag"] for t in solo} == {"Band"}
+
+
+def test_sync_records_album_id_and_groups_by_it(tmp_path):
+    st = State(); srv = make_server(st)
+    try:
+        api = Subsonic(f"http://127.0.0.1:{srv.server_port}", "u", "pw")
+        db = Database(tmp_path / "l.db")
+        sync.full_sync(db, api)
+        ts = db.all_tracks("remote")
+        assert {t["album_id"] for t in ts} == {"alb0", "alb1"} and {t["aa_tag"] for t in ts} == {"Band"}
+        assert len({t["_ak"] for t in ts}) == 2 and {t["_aa"] for t in ts} == {"Band"}
+    finally:
+        srv.shutdown()
+
+
+def test_old_database_is_migrated(tmp_path):
+    path = tmp_path / "old.db"
+    c = sqlite3.connect(path)
+    c.executescript("""CREATE TABLE tracks(id INTEGER PRIMARY KEY, key TEXT UNIQUE NOT NULL, source TEXT NOT NULL,
+        remote_id TEXT, path TEXT, title TEXT, artist TEXT, album_artist TEXT, album TEXT, genre TEXT, year INTEGER,
+        track_no INTEGER, disc_no INTEGER, duration REAL DEFAULT 0, bitrate INTEGER DEFAULT 0, suffix TEXT,
+        size INTEGER DEFAULT 0, rating INTEGER DEFAULT 0, starred INTEGER DEFAULT 0, play_count INTEGER DEFAULT 0,
+        last_played REAL DEFAULT 0, date_added REAL DEFAULT 0, mtime REAL DEFAULT 0, cover_id TEXT,
+        seen INTEGER DEFAULT 1, rg_gain REAL, folder_id TEXT);
+        INSERT INTO tracks(key, source, path, mtime, title, artist, album_artist, album) VALUES
+        ('/a.mp3', 'local', '/a.mp3', 123.0, 't', 'a', 'a', 'x');""")
+    c.commit(); c.close()
+    db = Database(path)
+    cols = {r["name"] for r in db.conn.execute("PRAGMA table_info(tracks)")}
+    assert {"album_id", "aa_tag"} <= cols
+    assert db.conn.execute("SELECT mtime FROM tracks").fetchone()[0] == 0           # local tags get re-read once
+    assert db.all_tracks("local")[0]["_aa"] == "a"
+
+
+def test_grid_and_browser_use_the_same_albums(tmp_path):
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from hivefi.ui.album_grid import AlbumGrid
+    from hivefi.ui.models import TrackModel
+    ts = [T(1, artist="X", genre="g"), T(2, artist="Y", genre="g"), T(3, artist="Z", genre="g"),
+          T(4, album="Other", artist="Solo", genre="g", path="/m/o/4.mp3")]
+    albums.annotate(ts)
+    g = AlbumGrid(lambda: None); g.set_tracks(ts)
+    texts = sorted(g.item(i).text().replace("\n", " | ") for i in range(g.count()))
+    assert texts == ["Hits | Various Artists", "Other | Solo"]
+    got = []
+    g.albumSelected.connect(got.append)
+    g.setCurrentRow(0); g.item(0).setSelected(True)
+    assert got and {t["id"] for t in got[-1]} in ({1, 2, 3}, {4})
+    m = TrackModel(); m.set_tracks(ts, sort_col="title")
+    assert {m.artist_of(t) for t in ts} == {albums.VARIOUS, "Solo"}
+    m.set_filters(artist=albums.VARIOUS)
+    assert {t["id"] for t in m.tracks} == {1, 2, 3}                           # the browser shows the whole compilation
+    m.set_filters(genre=None, artist=None, album=None, ids={4})
+    assert [t["id"] for t in m.tracks] == [4]
+    m.set_filters(text="hits")                                                # any other filter clears "one album"
+    assert m.ids is None and len(m.tracks) == 3

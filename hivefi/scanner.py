@@ -79,6 +79,7 @@ def read_tags(path: str) -> dict | None:
         title=_first(t, "title") or p.stem,
         artist=_first(t, "artist") or "Unknown Artist",
         album_artist=_first(t, "albumartist", "performer") or _first(t, "artist") or "Unknown Artist",
+        aa_tag=_first(t, "albumartist"),                  # the explicit tag only ("" when the file has none)
         album=_first(t, "album") or "Unknown Album",
         genre=_first(t, "genre"),
         year=_int(_first(t, "date", "originaldate", "year")),

@@ -193,8 +193,11 @@ class Player(QObject):
                 self.mp.set_next(None)
                 return
             nxt, cur = self.queue[self._next_idx], self.current
-            same = bool(cur) and nxt["album"] == cur["album"] and (nxt["album_artist"] or nxt["artist"]) == \
-                (cur["album_artist"] or cur["artist"])
+            if cur and cur.get("_ak") and nxt.get("_ak"):
+                same = nxt["_ak"] == cur["_ak"]                    # same album as the library groups albums
+            else:
+                same = bool(cur) and nxt["album"] == cur["album"] and (nxt["album_artist"] or nxt["artist"]) == \
+                    (cur["album_artist"] or cur["artist"])
             self.mp.set_next(self.resolve(nxt), same)
         finally:
             self._in_update = False

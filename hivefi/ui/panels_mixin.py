@@ -2,16 +2,17 @@
 visualizer + waveform seek bar, lock layout, named layouts, and the session that is restored on start."""
 import json
 
-from PyQt6.QtCore import QByteArray, QEvent, QSize, Qt, QTimer
+from PyQt6.QtCore import QByteArray, QEvent, QPoint, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QActionGroup, QKeySequence
-from PyQt6.QtWidgets import (QDockWidget, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QSlider, QStyle,
-                             QTabBar, QToolBar, QWidget)
+from PyQt6.QtWidgets import (QDockWidget, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton,
+                             QSlider, QStyle, QTabBar, QToolBar, QVBoxLayout, QWidget)
 
 from .. import session, waveform
 from .seekbar import STYLES as SEEK_STYLES, SeekBar
 from .visualizer import STYLES as VIS_STYLES, VisualizerPanel
 
-BUILTIN_LAYOUTS = ("Default", "Minimal (controls only)", "Now Playing focus", "Everything")
+BUILTIN_LAYOUTS = ("Default", "Minimal", "Now Playing focus", "Everything")
+STATE_VERSION = 2          # bump when docks are added/removed: an older saved arrangement is then ignored
 
 
 def _b64(ba: QByteArray) -> str:
@@ -20,6 +21,15 @@ def _b64(ba: QByteArray) -> str:
 
 def _unb64(s: str) -> QByteArray:
     return QByteArray.fromBase64(s.encode())
+
+
+class PaneDock(QDockWidget):
+    """A dock that says so when the user closes it (a tab hidden behind another tab is not closed)."""
+    closed = pyqtSignal()
+
+    def closeEvent(self, e):
+        super().closeEvent(e)
+        self.closed.emit()
 
 
 class PanelsMixin:
@@ -84,6 +94,58 @@ class PanelsMixin:
         from .main_window import Worker
         return Worker(fn, self)
 
+    # ------------------------------------------------------------------ track list as a movable panel
+    def _build_track_list_slot(self):
+        """Central area: the track list (plus a strip with a pop-out button in Edit Mode). Popping it out puts the
+        very same table into a dock that can be moved, floated, tabbed and resized like every other panel."""
+        self.central_box = QWidget()
+        lay = self.central_layout = QVBoxLayout(self.central_box)
+        lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
+        self.tracks_strip = QWidget(); sl = QHBoxLayout(self.tracks_strip); sl.setContentsMargins(6, 2, 6, 2)
+        sl.addWidget(QLabel("Track List")); sl.addStretch()
+        pop = QPushButton("⇱ Pop out into a movable panel"); pop.setFlat(True)
+        pop.clicked.connect(lambda: self._set_tracks_detached(True))
+        sl.addWidget(pop)
+        self.tracks_hint = QLabel("The track list is in its own panel.\nClose that panel (or untick View → Panels → "
+                                  "Track List) to bring it back here.")
+        self.tracks_hint.setAlignment(Qt.AlignmentFlag.AlignCenter); self.tracks_hint.hide()
+        lay.addWidget(self.tracks_strip); lay.addWidget(self.table, 1); lay.addWidget(self.tracks_hint, 1)
+        self.tracks_strip.hide()
+        self.setCentralWidget(self.central_box)
+        self.dock_tracks = PaneDock("Track List", self); self.dock_tracks.setObjectName("dock_tracks")
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.dock_tracks)
+        self.dock_tracks.hide()
+        self.dock_tracks.closed.connect(lambda: self._set_tracks_detached(False))
+        self.tracks_detached = False
+
+    def _set_tracks_detached(self, on, show=True):
+        on = bool(on)
+        if on:
+            if not self.tracks_detached:
+                size, where = self.central_box.size(), self.central_box.mapToGlobal(self.central_box.rect().topLeft())
+                self.dock_tracks.setWidget(self.table)
+                self.tracks_hint.show(); self.tracks_strip.hide()
+                if show:
+                    self.dock_tracks.setFloating(True)
+                    self.dock_tracks.resize(size); self.dock_tracks.move(where + QPoint(30, 30))
+            if show:
+                self.dock_tracks.show()
+        elif self.tracks_detached:
+            self.dock_tracks.hide()
+            self.central_layout.insertWidget(1, self.table, 1)
+            self.table.show(); self.tracks_hint.hide()
+            self.tracks_strip.setVisible(self.edit_mode)
+        self.tracks_detached = on
+        self.cfg.tracks_detached = on
+        if hasattr(self, "act_tracks_panel") and self.act_tracks_panel.isChecked() != on:
+            self.act_tracks_panel.blockSignals(True); self.act_tracks_panel.setChecked(on); self.act_tracks_panel.blockSignals(False)
+
+    def _sync_tracks_slot(self):
+        """After a saved arrangement was restored: the table follows the track list panel's visibility."""
+        want = not self.dock_tracks.isHidden()
+        if want != self.tracks_detached:
+            self._set_tracks_detached(want, show=False)
+
     # ------------------------------------------------------------------ waveform seek bar
     def _load_waveform(self, t):
         """Compute (or fetch from cache) the waveform of the playing track in the background."""
@@ -110,10 +172,11 @@ class PanelsMixin:
     # ------------------------------------------------------------------ visualizer
     def _build_visualizer(self):
         c = self.cfg
-        self.vis = VisualizerPanel(c.vis_style, c.vis_bars, c.vis_peaks)
+        self.vis = VisualizerPanel(c.vis_style, c.vis_bars, c.vis_peaks, c.vis_colors, c.vis_custom)
         self.dock_vis = self._dock("Visualizer", self.vis, "dock_vis", Qt.DockWidgetArea.RightDockWidgetArea)
         self.vis.styleChanged.connect(self._set_vis_style)
         self.vis.optionsChanged.connect(self._vis_options)
+        self.vis.colorsChanged.connect(self._set_vis_colors)
         self.dock_vis.visibilityChanged.connect(self._vis_visible)
         self.player.mp.visData.connect(self.vis.feed)
         self._update_vis_availability()
@@ -121,6 +184,10 @@ class PanelsMixin:
     def _set_vis_style(self, name):
         self.cfg.vis_style = name
         self.vis.set_style(name)
+
+    def _set_vis_colors(self, scheme, custom):
+        self.cfg.vis_colors, self.cfg.vis_custom = scheme, list(custom)
+        self.vis.set_colors(scheme, custom)
 
     def _vis_options(self):
         self.cfg.vis_bars, self.cfg.vis_peaks = self.vis.n_bars, self.vis.peaks_on
@@ -153,18 +220,21 @@ class PanelsMixin:
             d.setTitleBarWidget(None if on else QWidget())      # an empty widget hides the title bar
         for tb in self.toolbars:
             tb.setMovable(on)
-        for sp in (self.main_split, self.browser_split):
+        for sp in (self.browser_split,):
             for i in range(1, sp.count()):
                 sp.handle(i).setEnabled(on)
         for bar in self.findChildren(QTabBar):                  # tabs of stacked docks
             bar.setMovable(on)
+        if hasattr(self, "tracks_strip"):
+            self.tracks_strip.setVisible(on and not self.tracks_detached)
         if hasattr(self, "act_edit") and self.act_edit.isChecked() != on:
             self.act_edit.blockSignals(True); self.act_edit.setChecked(on); self.act_edit.blockSignals(False)
         if hasattr(self, "btn_edit"):
             self.btn_edit.blockSignals(True); self.btn_edit.setChecked(on); self.btn_edit.blockSignals(False)
             self.btn_edit.setText("✎ Editing layout — click to lock" if on else "✎ Edit layout")
-        self.statusBar().showMessage("Edit mode: drag panels and toolbars, resize them, close or float them. "
-                                     "Turn it off to lock the layout." if on else "Layout locked", 5000)
+        if self.isVisible():
+            self.statusBar().showMessage("Edit mode: drag panels and toolbars, resize them, close or float them. "
+                                         "Turn it off to lock the layout." if on else "Layout locked", 5000)
 
     def _apply_edit_state(self):
         self._set_edit_mode(self.edit_mode)
@@ -179,14 +249,13 @@ class PanelsMixin:
 
     # ------------------------------------------------------------------ layouts
     def _layout_snapshot(self):
-        return {"state": _b64(self.saveState()), "split": self._splits_json(self.main_split),
-                "browser": self._splits_json(self.browser_split)}
+        return {"state": _b64(self.saveState(STATE_VERSION)), "browser": self._splits_json(self.browser_split)}
 
     def _apply_layout_snapshot(self, snap):
-        self.restoreState(_unb64(snap["state"]))
+        self.restoreState(_unb64(snap["state"]), STATE_VERSION)
+        self._sync_tracks_slot()
         self._apply_edit_state()                                      # restoreState resets dock features
-        for sp, key in ((self.main_split, "split"), (self.browser_split, "browser")):
-            self._apply_splits(sp, snap.get(key, ""))
+        self._apply_splits(self.browser_split, snap.get("browser", ""))
 
     def _build_layout_menu(self):
         m = self.layout_menu; m.clear()
@@ -213,15 +282,17 @@ class PanelsMixin:
         self.statusBar().showMessage(f"Layout '{name}' saved", 4000)
 
     def _apply_builtin_layout(self, name):
-        self.restoreState(self._default_state)
-        docks = (self.dock_sources, self.dock_np, self.dock_next, self.dock_lyrics, self.dock_info, self.dock_eq,
-                 self.dock_vis)
-        show = {"Default": (self.dock_sources, self.dock_np),
-                "Minimal (controls only)": (),
+        self._set_tracks_detached(False)
+        self.restoreState(self._default_state, STATE_VERSION)
+        docks = (self.dock_sources, self.dock_browser, self.dock_np, self.dock_next,
+                 self.dock_lyrics, self.dock_info, self.dock_eq, self.dock_vis)
+        show = {"Default": (self.dock_sources, self.dock_browser, self.dock_np),
+                "Minimal": (),
                 "Now Playing focus": (self.dock_np, self.dock_lyrics, self.dock_vis),
                 "Everything": docks}[name]
         for d in docks:
             d.setVisible(d in show)
+        self._size_default_docks()
         for tb in self.toolbars:
             tb.setVisible(True)
         self._apply_edit_state()
@@ -244,7 +315,6 @@ class PanelsMixin:
             sp.setSizes([max(1, round(s * total_now / saved)) for s in sizes])
 
     def _restore_splits(self):
-        self._apply_splits(self.main_split, self.cfg.split_state)
         self._apply_splits(self.browser_split, self.cfg.browser_state)
 
     # ------------------------------------------------------------------ session
@@ -266,9 +336,8 @@ class PanelsMixin:
     def _save_session(self):
         try:
             self.cfg.geometry = _b64(self.saveGeometry())
-            self.cfg.state = _b64(self.saveState())
+            self.cfg.state = _b64(self.saveState(STATE_VERSION))
             self.cfg.header_state = _b64(self.table.horizontalHeader().saveState())
-            self.cfg.split_state = self._splits_json(self.main_split)
             self.cfg.browser_state = self._splits_json(self.browser_split)
             self.cfg.save()
             session.save(self._session_state())

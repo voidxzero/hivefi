@@ -178,12 +178,12 @@ def test_panels_layout_and_lock(win):
     assert all(not tb.isMovable() for tb in w.toolbars) and w.dock_sources.titleBarWidget() is not None
     from PyQt6.QtWidgets import QDockWidget
     assert all(d.features() == QDockWidget.DockWidgetFeature.NoDockWidgetFeatures for d in w.findChildren(QDockWidget))
-    assert not w.main_split.handle(1).isEnabled() and not w.browser_split.handle(1).isEnabled()
+    assert not w.browser_split.handle(1).isEnabled()
     w._set_edit_mode(True)
     # named layouts
     snap = w._layout_snapshot()
     w.cfg.layouts["mine"] = snap
-    w._apply_builtin_layout("Minimal (controls only)")
+    w._apply_builtin_layout("Minimal")
     assert not w.dock_sources.isVisible()
     w._apply_layout_snapshot(w.cfg.layouts["mine"])
     assert w.toolBarArea(next(t for t in w.toolbars if t.objectName() == "tb_seek")) == Qt.ToolBarArea.BottomToolBarArea
@@ -248,18 +248,18 @@ def test_session_roundtrip(win, tmp_path):
 def test_layout_and_sizes_persist(win, tmp_path):
     w = win
     w.dock_sources.setMinimumWidth(10)
-    w.main_split.setSizes([321, 579]); w.browser_split.setSizes([100, 200, 300])
+    w.resizeDocks([w.dock_browser], [321], Qt.Orientation.Vertical); wait(100)
+    w.browser_split.setSizes([100, 200, 300])
     w.seek.set_style("waveform")
     w.cfg.seek_style = "waveform"
     w._save_session()
     from hivefi.ui.main_window import MainWindow
     cfg2 = Config.load(w.cfg._path)
-    assert cfg2.split_state and cfg2.state and cfg2.browser_state
+    assert cfg2.state and cfg2.browser_state
     w.player.stop(); w.player.mp.shutdown()
     w2 = MainWindow(cfg2, Database(tmp_path / "l.db")); w2.show(); wait(1200)
     try:
-        a, b = w2.main_split.sizes(), w.main_split.sizes()
-        assert abs(a[0] / sum(a) - 321 / 900) < 0.05, (a, b)
+        assert abs(w2.dock_browser.height() - 321) < 25, w2.dock_browser.height()
         c = w2.browser_split.sizes(); assert c[0] < c[1] < c[2]
         assert w2.seek.style_name() == "waveform"
     finally:
@@ -286,12 +286,12 @@ def test_edit_mode_locks_resizing(win):
     _drag(w, x, y, 90)
     assert w.dock_sources.width() == before
     # the splitters are dead too
-    h = w.main_split.handle(1); sizes = w.main_split.sizes()
+    h = w.browser_split.handle(1); sizes = w.browser_split.sizes()
     from PyQt6.QtTest import QTest
-    QTest.mousePress(h, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(2, 1))
-    QTest.mouseMove(h, QPoint(2, 60)); QTest.mouseRelease(h, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(2, 60))
+    QTest.mousePress(h, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(1, 5))
+    QTest.mouseMove(h, QPoint(60, 5)); QTest.mouseRelease(h, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(60, 5))
     wait(50)
-    assert w.main_split.sizes() == sizes
+    assert w.browser_split.sizes() == sizes
     # edit mode on (menu action, status-bar button and shortcut share one state): the same drag resizes the panel
     w.act_edit.setChecked(True)
     assert w.edit_mode and w.btn_edit.isChecked() and "Editing" in w.btn_edit.text()
@@ -340,3 +340,86 @@ def test_album_art_has_a_border():
     assert ic.pixelColor(ICON // 2, ICON // 2).name() == "#3070c0"      # the cover itself, inside a frame
     left = next(x for x in range(ICON) if ic.pixelColor(x, ICON // 2).alpha() > 0)    # first drawn pixel = frame
     assert ic.pixelColor(left, ICON // 2).name() != "#3070c0" and ic.pixelColor(left + BORDER + 1, ICON // 2).name() == "#3070c0"
+
+
+def test_track_list_pops_out_and_back(win, tmp_path):
+    w = win
+    assert not w.tracks_detached and w.table.parent() is w.central_box and not w.tracks_strip.isVisible()
+    w._set_edit_mode(True)
+    assert w.tracks_strip.isVisible()                        # Edit Mode offers the pop-out button
+    w._set_tracks_detached(True); wait(100)
+    assert w.tracks_detached and w.table.parent() is w.dock_tracks and w.dock_tracks.isVisible()
+    assert w.dock_tracks.isFloating() and w.tracks_hint.isVisible() and w.act_tracks_panel.isChecked()
+    assert w.cfg.tracks_detached
+    assert w.model.rowCount() > 0 and w.table.model() is w.model               # same table, same data and selection
+    # it is a panel like the others: dock it into the right-hand area, tab it with another one
+    w.dock_tracks.setFloating(False); w.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, w.dock_tracks); wait(100)
+    assert not w.dock_tracks.isFloating() and w.dockWidgetArea(w.dock_tracks) == Qt.DockWidgetArea.RightDockWidgetArea
+    # the arrangement survives a restart
+    w._save_session()
+    from hivefi.ui.main_window import MainWindow
+    cfg2 = Config.load(w.cfg._path)
+    assert cfg2.tracks_detached
+    w.player.stop(); w.player.mp.shutdown()
+    w2 = MainWindow(cfg2, Database(tmp_path / "l.db")); w2.show(); wait(1500)
+    try:
+        assert w2.tracks_detached and w2.table.parent() is w2.dock_tracks
+        assert w2.dockWidgetArea(w2.dock_tracks) == Qt.DockWidgetArea.RightDockWidgetArea
+        assert not w2.dock_tracks.isHidden() and w2.model.rowCount() > 0
+        # closing the panel brings the table home
+        w2.dock_tracks.close(); wait(100)
+        assert not w2.tracks_detached and w2.table.parent() is w2.central_box and not w2.cfg.tracks_detached
+        w2.act_tracks_panel.setChecked(True); wait(100); assert w2.tracks_detached
+        w2.act_tracks_panel.setChecked(False); wait(100); assert not w2.tracks_detached
+        w2._set_tracks_detached(True); w2._apply_builtin_layout("Default"); wait(100)      # layouts bring it back too
+        assert not w2.tracks_detached and w2.table.parent() is w2.central_box
+    finally:
+        w2.player.stop(); w2.player.mp.shutdown()
+
+
+def test_visualizer_colors():
+    from PyQt6.QtGui import QColor
+    v = visualizer.VisualizerPanel("bars", 24, peaks=False); v.resize(320, 180); v.show()
+    got = []
+    v.colorsChanged.connect(lambda s, c: got.append((s, c)))
+    imgs = {}
+    for scheme in visualizer.SCHEMES:
+        v.set_colors(scheme, ["#ff0000", "#00ff00", "#0000ff"])
+        v.set_style("bars")
+        for _ in range(10):
+            v.feed([-5.0] * 512, {"rms": [-10, -10], "peak": [-3, -3]}); v._tick()
+        imgs[scheme] = v.grab().toImage()
+        for style in visualizer.STYLES:                       # every scheme draws in every style
+            v.set_style(style); [v._tick() for _ in range(3)]; v.grab()
+    # the palette really drives the picture: fire is warm, ocean is cool, custom uses the colours given
+    def dominant(img):
+        r = g = b = 0
+        for y in range(0, img.height(), 6):
+            for x in range(0, img.width(), 6):
+                c = img.pixelColor(x, y)
+                if c.alpha() and abs(c.red() - c.green()) + abs(c.green() - c.blue()) > 60:
+                    r += c.red(); g += c.green(); b += c.blue()
+        return r, g, b
+    fr, fg, fb = dominant(imgs["fire"]); assert fr > fb * 1.5
+    orr, og, ob = dominant(imgs["ocean"]); assert ob > orr * 1.5
+    assert imgs["fire"] != imgs["ocean"] != imgs["rainbow"] and imgs["custom"] != imgs["skin"]
+    v.set_colors("custom", ["#112233", "#445566", "#778899"]); assert v.custom == ["#112233", "#445566", "#778899"]
+    low, mid, hot, cap = v._theme(); assert low.name() == "#112233" and mid.name() == "#445566" and hot.name() == "#778899"
+    assert v._ramp(0.0).name() == "#112233" and v._ramp(1.0).name() == "#778899"
+    v.set_colors("nonsense"); assert v.scheme == "skin"
+    from PyQt6.QtWidgets import QMenu
+    m = QMenu(); v.colors_menu(m)
+    assert len(m.actions()[0].menu().actions()) >= 10
+
+
+def test_visualizer_color_choice_is_saved(win):
+    w = win
+    w._set_vis_colors("fire", w.cfg.vis_custom)
+    assert w.cfg.vis_colors == "fire" and w.vis.scheme == "fire"
+    w._set_vis_colors("custom", ["#010203", "#040506", "#070809"])
+    assert w.cfg.vis_custom == ["#010203", "#040506", "#070809"] and w.vis.custom == w.cfg.vis_custom
+    w.cfg.save()
+    c2 = Config.load(w.cfg._path)
+    assert c2.vis_colors == "custom" and c2.vis_custom == ["#010203", "#040506", "#070809"]
+    v2 = visualizer.VisualizerPanel("bars", 24, True, c2.vis_colors, c2.vis_custom)
+    assert v2.scheme == "custom" and v2.custom == c2.vis_custom
