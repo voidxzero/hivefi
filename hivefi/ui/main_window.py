@@ -19,11 +19,13 @@ from ..db import Database
 from ..mpris import Mpris
 from ..player import Player
 from ..subsonic import Subsonic, SubsonicError
-from .. import art, convert, folders, libexport, lyrics, tagtools, organizer, rgscan, skins, smart, tagedit, updater
+from .. import art, convert, folders, libexport, listenbrainz, lyrics, radio, tagtools, organizer, rgscan, skins, smart, tagedit, updater
 from .album_grid import AlbumGrid
 from .dialogs import TagDialog
 from .audio_dialog import AudioDialog
 from .duplicates_dialog import DuplicatesDialog
+from . import shortcuts
+from .station_dialog import StationDialog
 from .tagtools_dialog import TagToolsDialog
 from .tools_dialogs import ConvertDialog, MissingDialog, OrganizeDialog, ReplayGainDialog
 from .equalizer import EqualizerPanel
@@ -109,6 +111,9 @@ class MainWindow(PanelsMixin, QMainWindow):
 
         self._build_ui()
         self._build_menu()
+        self.shortcut_actions = shortcuts.collect(self.menuBar())
+        self.shortcut_defaults = {k: shortcuts.portable(a.shortcut()) for k, a in self.shortcut_actions.items()}
+        self.apply_shortcuts()
         self._connect_player()
         self.mpris = Mpris(self, self.player)
         self.mini = MiniPlayer(self.player)
@@ -161,6 +166,8 @@ class MainWindow(PanelsMixin, QMainWindow):
     def _resolve(self, t):
         if t["source"] == "local":
             return QUrl.fromLocalFile(t["path"])
+        if t["source"] == "radio":
+            return QUrl(t["url"])
         if self.api is None:
             return QUrl()
         return QUrl(self.api.stream_url(t["remote_id"], self.cfg.max_bitrate))
@@ -371,6 +378,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         P = self.player
         P.positionChanged.connect(self.lyrics_panel.set_position)
         self.lyrics_panel.seekRequested.connect(P.seek)
+        P.streamTitle.connect(self._on_stream_title)
         P.trackChanged.connect(self._on_track)
         P.stateChanged.connect(lambda pl: self.act_play.setIcon(
             self._icon(QStyle.StandardPixmap.SP_MediaPause if pl else QStyle.StandardPixmap.SP_MediaPlay)))
@@ -409,6 +417,10 @@ class MainWindow(PanelsMixin, QMainWindow):
             if parent is not None:
                 self._add_folder_node(parent, src, "*", "", "Folders", None)
         self._items[("queue", None)] = item(self.tree, "Now Playing", ("queue", None))
+        rad = item(self.tree, "Radio", ("radio", None))
+        self._items[("radio", None)] = rad
+        for st in self.db.radio_stations():
+            self._items[("radio", st["id"])] = item(rad, st["name"], ("radio", st["id"]))
         pls = item(self.tree, "Playlists", None)
         for p in self.db.playlists():
             if p["sync"] and not self.cfg.server_enabled:      # server-backed playlists hide with Navidrome
@@ -420,7 +432,7 @@ class MainWindow(PanelsMixin, QMainWindow):
             self._items[("smart", name)] = item(auto, name, ("smart", name))
         for sp in self.db.smart_playlists():
             self._items[("smart", sp["id"])] = item(auto, "★ " + sp["name"], ("smart", sp["id"]))
-        for top in (lib, pls, auto):
+        for top in (lib, pls, auto, rad):
             top.setExpanded(True)
         if self.cfg.server_configured:
             self._items[("remote", None)].setExpanded(True)
@@ -430,6 +442,39 @@ class MainWindow(PanelsMixin, QMainWindow):
         self.tree.blockSignals(False)
         if sel not in self._items:
             self.source = ("all", None); self.load_source()
+
+    # ------------------------------------------------ internet radio
+    def _station_dialog(self, st=None):
+        dlg = StationDialog(st, self)
+        return dlg.values() if dlg.exec() else None
+
+    def _add_station(self):
+        v = self._station_dialog()
+        if v:
+            sid = self.db.add_radio(**v)
+            self.source = ("radio", sid); self.refresh_playlists(); self.load_source()
+
+    def _edit_station(self, sid):
+        st = self.db.radio_station(sid)
+        v = st and self._station_dialog(st)
+        if v:
+            self.db.update_radio(sid, **v); self.refresh_playlists(); self.load_source()
+
+    def _delete_station(self, sid, ask=True):
+        if ask and QMessageBox.question(self, "Delete station", "Delete this radio station?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self.db.delete_radio(sid)
+        if self.source == ("radio", sid):
+            self.source = ("radio", None)
+        self.refresh_playlists(); self.load_source()
+
+    def _on_stream_title(self, title):
+        cur = self.player.current
+        if cur and cur["source"] == "radio":
+            self.np_panel.sub.setText(f'{title}\n{cur["title"]}')
+            self.setWindowTitle(f'{title} — {cur["title"]}')
+            self.statusBar().showMessage(f"♪ {title}", 8000)
 
     # ------------------------------------------------ folder tree (Navidrome's and this computer's directories)
     def _folder_index(self, src):
@@ -512,6 +557,9 @@ class MainWindow(PanelsMixin, QMainWindow):
         if kind == "all": tracks = self._tracks()
         elif kind == "remote" and arg is not None:
             tracks = [t for t in self._tracks("remote") if t.get("folder_id") == arg]
+        elif kind == "radio":
+            stations = self.db.radio_stations()
+            tracks = [radio.radio_track(s) for s in stations if arg is None or s["id"] == arg]
         elif kind == "folder":
             src, root, prefix = arg
             tracks = self._folder_index(src).tracks(root, prefix)
@@ -523,7 +571,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         saved = (m.genre, m.artist, m.album) if keep else (None, None, None)
         m.genre = m.artist = m.album = m.ids = None
         hh = self.table.horizontalHeader()
-        if kind in ("queue", "playlist", "smart", "folder"):     # these keep their own order
+        if kind in ("queue", "playlist", "smart", "folder", "radio"):   # these keep their own order
             hh.setSortIndicatorShown(False)
             m.set_tracks(tracks, sort_col=None)
         else:
@@ -543,7 +591,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         self._sel_changed()
 
     def _header_sort(self, section):
-        if self.source[0] in ("queue", "playlist", "smart", "folder") or section in (0,):
+        if self.source[0] in ("queue", "playlist", "smart", "folder", "radio") or section in (0,):
             return
         hh = self.table.horizontalHeader()
         desc = hh.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder if hh.sortIndicatorSection() == section else False
@@ -666,6 +714,10 @@ class MainWindow(PanelsMixin, QMainWindow):
 
     # ------------------------------------------------ plays / ratings / stars
     def _on_played(self, t):
+        if t["source"] == "radio":
+            return
+        if self.cfg.listenbrainz_token and listenbrainz.queue_listen(self.db, t):
+            self._lb_flush()
         self.db.bump_play(t["id"])
         fresh = self.db.track(t["id"]) or {}
         t["play_count"] = fresh.get("play_count", 0)
@@ -674,7 +726,21 @@ class MainWindow(PanelsMixin, QMainWindow):
             self.db.queue_op("scrobble", {"id": t["remote_id"], "time_ms": int(time.time() * 1000)})
             self._kick_flush()
 
+    def _lb_flush(self):
+        tok, base = self.cfg.listenbrainz_token, self.cfg.listenbrainz_url
+        if tok and not (getattr(self, "_lb_worker", None) and self._lb_worker.isRunning()):
+            w = Worker(lambda _p: listenbrainz.flush(self.db, tok, base), self)
+            self._lb_worker = w; self._run(w)
+
     def _on_now_playing(self, t):
+        if self.cfg.listenbrainz_token and t["source"] in ("local", "remote"):
+            tok, base, tc = self.cfg.listenbrainz_token, self.cfg.listenbrainz_url, dict(t)
+            def send(_p):
+                try:
+                    listenbrainz.now_playing(tok, tc, base)
+                except Exception:  # noqa: BLE001 - "now playing" is best effort
+                    pass
+            self._run(Worker(send, self))
         if t["source"] == "remote" and self.cfg.scrobble and self.api:
             api = self.api
             w = Worker(lambda _p: api.scrobble(t["remote_id"], submission=False), self)
@@ -690,6 +756,9 @@ class MainWindow(PanelsMixin, QMainWindow):
             for t in tracks: self.model.update_track(t["id"], **fields)
 
     def set_rating(self, tracks, r):
+        tracks = [t for t in tracks if t["source"] in ("local", "remote")]
+        if not tracks:
+            return
         self.db.set_ratings([t["id"] for t in tracks], r)
         self._model_refresh(tracks, rating=r)
         self.db.queue_ops("rating", [{"id": t["remote_id"], "rating": r} for t in tracks if t["source"] == "remote"])
@@ -707,6 +776,9 @@ class MainWindow(PanelsMixin, QMainWindow):
         self._kick_flush()
 
     def set_star(self, tracks, on):
+        tracks = [t for t in tracks if t["source"] in ("local", "remote")]
+        if not tracks:
+            return
         self.db.set_starred_many([t["id"] for t in tracks], on)
         self._model_refresh(tracks, starred=int(on))
         self.db.queue_ops("star", [{"id": t["remote_id"], "on": on} for t in tracks if t["source"] == "remote"])
@@ -720,6 +792,13 @@ class MainWindow(PanelsMixin, QMainWindow):
         m.addAction("Play Now", lambda: self.player.play_list(sel, 0))
         m.addAction("Play Next", lambda: self.player.enqueue(sel, next_=True))
         m.addAction("Queue Last", lambda: self.player.enqueue(sel))
+        if all(t["source"] == "radio" for t in sel):
+            m.addSeparator()
+            if len(sel) == 1:
+                m.addAction("Edit Station…", lambda: self._edit_station(-sel[0]["id"]))
+            m.addAction("Delete Station" + ("s" if len(sel) > 1 else ""),
+                        lambda: [self._delete_station(-t["id"], ask=False) for t in sel])
+            m.exec(self.table.viewport().mapToGlobal(pos)); return
         m.addSeparator()
         rm = m.addMenu("Rating")
         for r in range(6):
@@ -764,6 +843,11 @@ class MainWindow(PanelsMixin, QMainWindow):
         elif d and d == ("remote", None):
             m.addAction("Turn Navidrome off" if self.cfg.server_enabled else "Turn Navidrome on",
                         lambda: self.set_library_enabled(Config.NAVIDROME, not self.cfg.server_enabled))
+        elif d and d[0] == "radio":
+            m.addAction("Add Station…", self._add_station)
+            if d[1] is not None:
+                m.addAction("Edit…", lambda: self._edit_station(d[1]))
+                m.addAction("Delete", lambda: self._delete_station(d[1]))
         elif d and d[0] == "folder":
             src, root, prefix = d[1]
             tr = lambda: self._folder_index(src).tracks(root, prefix)
@@ -1157,6 +1241,18 @@ class MainWindow(PanelsMixin, QMainWindow):
         self.skin_menu.addAction("Reload Skins", self._build_skin_menu)
         self.skin_menu.addAction("Open Skins Folder…",
                                  lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(skins.skins_dir()))))
+
+    def current_shortcuts(self) -> dict:
+        """{command: shortcut now in effect}"""
+        return {k: shortcuts.portable(a.shortcut()) for k, a in self.shortcut_actions.items()}
+
+    def apply_shortcuts(self, overrides=None):
+        """Apply the user's shortcut changes (cfg.shortcuts, or `overrides` which also replaces them)."""
+        if overrides is not None:
+            self.cfg.shortcuts = {k: v for k, v in overrides.items() if self.shortcut_defaults.get(k) != v}
+        for key, a in self.shortcut_actions.items():
+            seq = self.cfg.shortcuts.get(key, self.shortcut_defaults[key])
+            a.setShortcut(QKeySequence(seq) if seq else QKeySequence())
 
     def _import_skin(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import skin", "", "Skins (*.json)")

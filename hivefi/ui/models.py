@@ -196,14 +196,14 @@ class TrackModel(QAbstractTableModel):
             if key == "_state":
                 return ("▶" if t["id"] == self.playing_id else "") + ("♥" if t["starred"] else "")
             v = t.get(key)
-            if key == "duration": return fmt_time(v)
+            if key == "duration": return "live" if t.get("source") == "radio" else fmt_time(v)
             if key == "rating": return "★" * (v or 0) + "☆" * (5 - (v or 0))
             if key in ("track_no", "year", "play_count", "disc_no"): return str(v) if v else ""
             if key == "bitrate": return f"{v} kbps" if v else ""
             if key == "suffix": return (v or "").upper()
             if key in ("date_added", "last_played"):
                 return time.strftime("%Y-%m-%d", time.localtime(v)) if v else ""
-            if key == "source": return "Navidrome" if v == "remote" else "Local"
+            if key == "source": return {"remote": "Navidrome", "radio": "Radio"}.get(v, "Local")
             return v
         if role == Qt.ItemDataRole.ForegroundRole and t["id"] == self.playing_id:
             return QBrush(QColor(self.playing_color))

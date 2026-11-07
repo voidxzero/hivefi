@@ -28,6 +28,8 @@ def flush_ops(db, api: Subsonic) -> int:
     """Send queued offline operations. Stops on network failure, drops ops the server rejects."""
     done = 0
     for oid, op, p in db.pending_ops():
+        if op not in ("scrobble", "star", "rating", "delete_playlist"):
+            continue                                            # other queues (ListenBrainz) have their own sender
         try:
             if op == "scrobble":
                 api.scrobble(p["id"], p.get("time_ms"), True)
@@ -110,6 +112,15 @@ def sync_playlists(db, api: Subsonic):
     db.commit()
 
 
+def sync_radio(db, api: Subsonic) -> int:
+    """Stations kept on the server are added to the local list (local stations are left alone)."""
+    n = 0
+    for s in api.radio_stations():
+        db.add_radio(s["name"] or s["url"], s["url"], homepage=s["homepage"], remote_id=s["id"])
+        n += 1
+    return n
+
+
 def full_sync(db, api: Subsonic, progress=None, folders=None) -> dict:
     say = progress or (lambda m: None)
     say("Connecting…")
@@ -121,6 +132,7 @@ def full_sync(db, api: Subsonic, progress=None, folders=None) -> dict:
     added, removed, changed = pull_library(db, api, say, folders)
     say("Syncing playlists…")
     sync_playlists(db, api)
+    sync_radio(db, api)
     db.set_meta("last_sync", time.time())
     return {"songs": added, "removed": removed, "sent_ops": sent, "changed": changed,
             "folder_names": names}

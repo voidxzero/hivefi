@@ -27,6 +27,7 @@ class Player(QObject):
     nowPlaying = pyqtSignal(object)
     error = pyqtSignal(str)
     notice = pyqtSignal(str)
+    streamTitle = pyqtSignal(str)            # "Artist - Title" announced by an internet radio stream
 
     def __init__(self, url_resolver, cfg, parent=None):
         super().__init__(parent)
@@ -52,6 +53,7 @@ class Player(QObject):
         self.mp.errorOccurred.connect(self.error.emit)
         self.mp.advanced.connect(self._on_advanced)
         self.mp.notice.connect(self.notice.emit)
+        self.mp.streamTitle.connect(self.streamTitle.emit)
         self.mp.engineChanged.connect(lambda _e: self._apply_volume())
 
     # --- settings

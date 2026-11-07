@@ -557,3 +557,42 @@ def cell_by(tab, name, col):
     for r in range(tab.table.rowCount()):
         if tab.table.item(r, 0).text().split("   ")[0] == name:
             return tab.table.cellWidget(r, col)
+
+
+def test_keyboard_shortcuts_editor(win):
+    from PyQt6.QtGui import QKeySequence
+    from hivefi.ui.settings_dialog import SettingsDialog
+    from hivefi.ui import shortcuts
+    w = win
+    reg = w.shortcut_actions
+    assert "Playback ▸ Play/Pause" in reg and "File ▸ Preferences…" in reg and "View ▸ Panels ▸ Edit Mode" in reg
+    assert w.shortcut_defaults["Playback ▸ Play/Pause"] == "Ctrl+Space" and w.cfg.shortcuts == {}
+    # change one through the Preferences tab
+    dlg = SettingsDialog(w.cfg, w)
+    tab = dlg.hotkeys_tab
+    assert tab is not None and tab.table.rowCount() == len(reg)
+    tab.set_value("Playback ▸ Play/Pause", "Ctrl+Alt+P")
+    tab.set_value("Playback ▸ Next", "")                                  # cleared
+    dlg.apply()
+    assert reg["Playback ▸ Play/Pause"].shortcut().toString() == "Ctrl+Alt+P"
+    assert reg["Playback ▸ Next"].shortcut().isEmpty()
+    assert w.cfg.shortcuts == {"Playback ▸ Play/Pause": "Ctrl+Alt+P", "Playback ▸ Next": ""}     # only the changes are stored
+    # it persists and is applied again at the next start
+    w.cfg.save()
+    from hivefi.config import Config
+    c2 = Config.load(w.cfg._path)
+    assert c2.shortcuts == w.cfg.shortcuts
+    w.cfg.shortcuts = dict(c2.shortcuts); w.apply_shortcuts()
+    assert reg["Playback ▸ Play/Pause"].shortcut().toString() == "Ctrl+Alt+P"
+    # conflicts are reported
+    dlg2 = SettingsDialog(w.cfg, w); t2 = dlg2.hotkeys_tab
+    t2.set_value("Playback ▸ Previous", "Ctrl+Alt+P")
+    assert "Ctrl+Alt+P" in t2.warn.text() and "Play/Pause" in t2.warn.text()
+    assert shortcuts.conflicts({"a": "X", "b": "X", "c": "", "d": "", "e": "Y"}) == {"X": ["a", "b"]}
+    # filter and reset
+    t2.filter.setText("play/pause")
+    assert [r for r in range(t2.table.rowCount()) if not t2.table.isRowHidden(r)] == [t2.keys.index("Playback ▸ Play/Pause")]
+    t2.filter.setText("")
+    t2.reset_all(); dlg2.apply()
+    assert w.cfg.shortcuts == {} and reg["Playback ▸ Play/Pause"].shortcut().toString() == "Ctrl+Space"
+    assert reg["Playback ▸ Next"].shortcut().toString() == "Ctrl+Right"

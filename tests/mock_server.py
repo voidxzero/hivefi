@@ -19,6 +19,7 @@ class State:
         self.playlists = {"p1": {"id": "p1", "name": "Server list", "songIds": ["1", "2"]}}
         self.calls = []
         self.next_pl = 2
+        self.radio = None                # e.g. [{'id': 'r1', 'name': 'FM', 'streamUrl': 'http://x/s'}]: enables radio
         self.folders = None              # e.g. [{'id': '1', 'name': 'Music'}, ...]: enables getMusicFolders
 
 
@@ -50,6 +51,8 @@ def make_server(state: State):
                 if one("musicFolderId") is not None:
                     songs = [s for s in songs if s.get("folder") == one("musicFolderId")]
                 return reply({"searchResult3": {"song": songs[off:off + n]}})
+            if ep == "getInternetRadioStations" and state.radio is not None:
+                return reply({"internetRadioStations": {"internetRadioStation": state.radio}})
             if ep == "getPlaylists":
                 return reply({"playlists": {"playlist": [{"id": p["id"], "name": p["name"]}
                                                           for p in state.playlists.values()]}})

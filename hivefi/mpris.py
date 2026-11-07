@@ -133,7 +133,7 @@ class Mpris(QObject):
         t = self.player.current
         if not t:
             return {"mpris:trackid": QDBusObjectPath(NO_TRACK)}
-        m = {"mpris:trackid": QDBusObjectPath(f"/org/hivefi/track/{t['id']}"),
+        m = {"mpris:trackid": QDBusObjectPath(f"/org/hivefi/track/{str(t['id']).replace('-', 'r')}"),
              "mpris:length": _i64(int((t.get("duration") or 0) * 1_000_000)),
              "xesam:title": t["title"], "xesam:artist": _strlist([t["artist"]]), "xesam:album": t["album"],
              "xesam:genre": _strlist([t["genre"]] if t.get("genre") else [])}

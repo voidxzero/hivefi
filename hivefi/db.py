@@ -38,6 +38,10 @@ CREATE TABLE IF NOT EXISTS pending_ops(
   id INTEGER PRIMARY KEY, op TEXT NOT NULL, payload TEXT NOT NULL, created REAL
 );
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS radio_stations(
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL UNIQUE, genre TEXT DEFAULT '', homepage TEXT DEFAULT '',
+  remote_id TEXT
+);
 CREATE TABLE IF NOT EXISTS smart_playlists(id INTEGER PRIMARY KEY, name TEXT NOT NULL, spec TEXT NOT NULL);
 """
 
@@ -250,6 +254,32 @@ class Database:
     def add_to_playlist(self, pid, track_ids):
         cur = [t["id"] for t in self.playlist_tracks(pid)]
         self.set_playlist_tracks(pid, cur + list(track_ids))
+
+    # ---- internet radio -----------------------------------------------
+    def radio_stations(self):
+        return [dict(r) for r in self.conn.execute("SELECT * FROM radio_stations ORDER BY name COLLATE NOCASE")]
+
+    def radio_station(self, sid):
+        r = self.conn.execute("SELECT * FROM radio_stations WHERE id=?", (sid,)).fetchone()
+        return dict(r) if r else None
+
+    def add_radio(self, name, url, genre="", homepage="", remote_id=None):
+        """Add a station (or update the one with the same stream URL). Returns its id."""
+        self.conn.execute(
+            "INSERT INTO radio_stations(name,url,genre,homepage,remote_id) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(url) DO UPDATE SET name=excluded.name, genre=CASE WHEN excluded.genre!='' THEN excluded.genre "
+            "ELSE genre END, homepage=CASE WHEN excluded.homepage!='' THEN excluded.homepage ELSE homepage END, "
+            "remote_id=COALESCE(excluded.remote_id, remote_id)", (name, url, genre, homepage, remote_id))
+        self.conn.commit()
+        return self.conn.execute("SELECT id FROM radio_stations WHERE url=?", (url,)).fetchone()[0]
+
+    def update_radio(self, sid, name, url, genre="", homepage=""):
+        self.conn.execute("UPDATE radio_stations SET name=?, url=?, genre=?, homepage=? WHERE id=?",
+                          (name, url, genre, homepage, sid))
+        self.conn.commit()
+
+    def delete_radio(self, sid):
+        self.conn.execute("DELETE FROM radio_stations WHERE id=?", (sid,)); self.conn.commit()
 
     # ---- smart playlists ----------------------------------------------
     def smart_playlists(self):

@@ -1,4 +1,5 @@
 from PyQt6.QtCore import QThread, Qt, pyqtSignal
+from PyQt6.QtGui import QKeySequence
 from PyQt6.QtWidgets import (QListWidgetItem, QTableWidget, QTableWidgetItem, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
                              QLabel, QLineEdit, QListWidget, QPushButton, QSpinBox, QTabWidget,
                              QVBoxLayout, QWidget, QComboBox)
@@ -111,6 +112,67 @@ class PanelsTab(QWidget):
             self.win.cfg.layouts.pop(name, None); self.win.cfg.save(); self.refresh()
 
 
+class HotkeysTab(QWidget):
+    """Every menu command with its keyboard shortcut; click a shortcut and press the keys you want."""
+
+    def __init__(self, win):
+        super().__init__()
+        from PyQt6.QtWidgets import QKeySequenceEdit
+        self.win = win
+        self.defaults = dict(win.shortcut_defaults)
+        self.keys = list(win.shortcut_actions)
+        cur = win.current_shortcuts()
+        self.filter = QLineEdit(); self.filter.setPlaceholderText("Filter commands…")
+        self.filter.textChanged.connect(self._filter)
+        self.table = QTableWidget(len(self.keys), 3)
+        self.table.setHorizontalHeaderLabels(["Command", "Shortcut", ""])
+        self.table.verticalHeader().hide(); self.table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.table.setColumnWidth(0, 270); self.table.setColumnWidth(1, 150)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.edits = {}
+        for r, key in enumerate(self.keys):
+            it = QTableWidgetItem(key); it.setFlags(Qt.ItemFlag.ItemIsEnabled); self.table.setItem(r, 0, it)
+            e = QKeySequenceEdit(QKeySequence(cur[key])); e.setMaximumSequenceLength(1)
+            e.keySequenceChanged.connect(lambda _s, k=key: self._changed(k))
+            self.table.setCellWidget(r, 1, e); self.edits[key] = e
+            b = QPushButton("Default"); b.clicked.connect(lambda _c=False, k=key: self.set_value(k, self.defaults[k]))
+            self.table.setCellWidget(r, 2, b)
+        self.warn = QLabel(""); self.warn.setStyleSheet("color: #e5483f;")
+        reset = QPushButton("Reset all to defaults"); reset.clicked.connect(self.reset_all)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Click a shortcut, then press the keys you want (Backspace/Delete clears it)."))
+        lay.addWidget(self.filter); lay.addWidget(self.table, 1); lay.addWidget(self.warn); lay.addWidget(reset)
+        self._changed(None)
+
+    def values(self) -> dict:
+        from .shortcuts import portable
+        return {k: portable(e.keySequence()) for k, e in self.edits.items()}
+
+    def set_value(self, key, seq):
+        self.edits[key].setKeySequence(QKeySequence(seq))
+
+    def reset_all(self):
+        for k, v in self.defaults.items():
+            self.set_value(k, v)
+
+    def _filter(self, text):
+        t = text.lower()
+        for r, k in enumerate(self.keys):
+            self.table.setRowHidden(r, bool(t) and t not in k.lower())
+
+    def _changed(self, _key):
+        from .shortcuts import conflicts
+        c = conflicts(self.values())
+        self.warn.setText("  ".join(f"{s} is used by: {', '.join(ks)}" for s, ks in c.items()))
+        self.conflicts = c
+
+    def apply_to_window(self):
+        if getattr(self, "conflicts", None):                      # the later duplicates would silently not work
+            pass
+        self.win.apply_shortcuts(self.values())
+        self.win.cfg.save()
+
+
 _RUNNING: set = set()
 
 
@@ -200,6 +262,13 @@ class SettingsDialog(QDialog):
         self.vis_on = QCheckBox("Visualizer analysers in the audio chain (about 1% CPU)")
         self.vis_on.setChecked(cfg.vis_enabled)
         gl.addWidget(QLabel("On start:")); gl.addWidget(self.resume); gl.addWidget(self.vis_on)
+        self.lb_token = QLineEdit(cfg.listenbrainz_token); self.lb_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.lb_token.setPlaceholderText("ListenBrainz user token (empty = don't scrobble)")
+        self.lb_url = QLineEdit(cfg.listenbrainz_url)
+        self.lb_status = QLabel(""); lb_test = QPushButton("Test"); lb_test.clicked.connect(self._test_lb)
+        lbrow = QHBoxLayout(); lbrow.addWidget(self.lb_token, 1); lbrow.addWidget(lb_test)
+        gl.addWidget(QLabel("Scrobble plays to ListenBrainz (listenbrainz.org → Settings → User token):"))
+        gl.addLayout(lbrow); gl.addWidget(self.lb_url); gl.addWidget(self.lb_status)
         gl.addWidget(self.tray); gl.addWidget(self.close_tray); gl.addWidget(self.updates); gl.addWidget(self.gh_token)
         gl.addStretch()
         tabs.addTab(gen, "General")
@@ -207,6 +276,9 @@ class SettingsDialog(QDialog):
         self.panels_tab = PanelsTab(parent) if hasattr(parent, "panel_specs") else None
         if self.panels_tab:
             tabs.addTab(self.panels_tab, "Panels")
+        self.hotkeys_tab = HotkeysTab(parent) if hasattr(parent, "shortcut_actions") else None
+        if self.hotkeys_tab:
+            tabs.addTab(self.hotkeys_tab, "Hotkeys")
 
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
@@ -245,6 +317,14 @@ class SettingsDialog(QDialog):
         self._closed = True
         super().done(r)
 
+    def _test_lb(self):
+        from .. import listenbrainz
+        tok, url = self.lb_token.text().strip(), self.lb_url.text().strip() or listenbrainz.DEFAULT_URL
+        self.lb_status.setText("Testing…")
+        self._async(lambda: listenbrainz.validate(tok, url),
+                    lambda user: self.lb_status.setText(f"✔ Token belongs to {user or 'a user'}"),
+                    lambda e: self.lb_status.setText(f"✘ {e}"))
+
     def _test(self):
         self.status.setText("Testing…")
         self._async(lambda: self._api().ping(), lambda _r: self.status.setText("✔ Connected"),
@@ -279,6 +359,8 @@ class SettingsDialog(QDialog):
     def apply(self):
         if self.panels_tab:
             self.panels_tab.apply_to_window()
+        if self.hotkeys_tab:
+            self.hotkeys_tab.apply_to_window()
         c = self.cfg
         c.library_dirs = self.folders()
         c.libraries_off = self.disabled_folders() + ([] if self.enabled.isChecked() else [c.NAVIDROME])
@@ -289,6 +371,8 @@ class SettingsDialog(QDialog):
         c.server_folders, names = self.chosen_server_folders()
         if names:
             c.server_folder_names = names
+        c.listenbrainz_token = self.lb_token.text().strip()
+        c.listenbrainz_url = self.lb_url.text().strip() or "https://api.listenbrainz.org"
         c.resume_mode, c.vis_enabled = self.resume.currentData(), self.vis_on.isChecked()
         c.write_ratings = self.write_rt.isChecked()
         c.check_updates, c.github_token = self.updates.isChecked(), self.gh_token.text().strip()

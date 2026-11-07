@@ -126,6 +126,17 @@ class Subsonic:
                 yield from _aslist(self.call("getAlbum", id=a["id"]).get("album", {}).get("song"))
             offset += page
 
+    def radio_stations(self) -> list[dict]:
+        """The server's internet radio stations ([] when it has none / does not support them)."""
+        try:
+            body = self.call("getInternetRadioStations")
+        except SubsonicError:
+            return []
+        return [{"id": str(s.get("id")), "name": s.get("name") or "", "url": s.get("streamUrl") or "",
+                 "homepage": s.get("homePageUrl") or ""}
+                for s in _aslist(body.get("internetRadioStations", {}).get("internetRadioStation"))
+                if s.get("streamUrl")]
+
     def playlists(self):
         return _aslist(self.call("getPlaylists").get("playlists", {}).get("playlist"))
 

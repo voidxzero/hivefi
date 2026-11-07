@@ -316,6 +316,7 @@ class GstEngine(QObject):
     advanced = pyqtSignal()          # the engine already moved on to the queued "next" track by itself
     notice = pyqtSignal(str)
     visData = pyqtSignal(object, object)     # (spectrum dB list | None, {'rms','peak'} | None) ~30x per second
+    streamTitle = pyqtSignal(str)            # what an internet radio stream says is playing (ICY / tag title)
 
     def __init__(self, cfg, parent=None):
         super().__init__(parent)
@@ -612,9 +613,14 @@ class GstEngine(QObject):
                     self._preloaded = None
                     self._xf_planned = False
                     self.notice.emit(f"Crossfade is unavailable on this output ({err.message}); using gapless.")
-        mags = lv = None
+        mags = lv = title = None
         while (m := cur.bus.pop()) is not None:
             t = m.type
+            if t == Gst.MessageType.TAG:
+                ok, name = m.parse_tag().get_string("title")
+                if ok and name:
+                    title = name
+                continue
             if t == Gst.MessageType.ELEMENT:
                 kind, val = parse_vis(m.get_structure())
                 if kind == "spectrum": mags = val
@@ -647,6 +653,8 @@ class GstEngine(QObject):
                     flags = Gst.SeekFlags.FLUSH | (Gst.SeekFlags.ACCURATE if self.cfg.seek_accurate
                                                    else Gst.SeekFlags.KEY_UNIT)
                     cur.pipe.seek_simple(Gst.Format.TIME, flags, ms * Gst.MSECOND)
+        if title:
+            self.streamTitle.emit(title)
         if mags is not None or lv is not None:
             self.visData.emit(mags, lv)
         if self._state != PS.PlayingState:
@@ -691,6 +699,7 @@ class Backend(QObject):
     advanced = pyqtSignal()
     notice = pyqtSignal(str)
     visData = pyqtSignal(object, object)
+    streamTitle = pyqtSignal(str)
 
     def __init__(self, cfg, parent=None):
         super().__init__(parent)
@@ -718,6 +727,7 @@ class Backend(QObject):
             g.advanced.connect(lambda: self._fwd(g, self.advanced))
             g.notice.connect(self.notice)
             g.visData.connect(lambda a, b: self._fwd(g, self.visData, a, b))
+            g.streamTitle.connect(lambda s: self._fwd(g, self.streamTitle, s))
             g.errorOccurred.connect(self._gst_error)
 
     @property
