@@ -19,11 +19,12 @@ from ..db import Database
 from ..mpris import Mpris
 from ..player import Player
 from ..subsonic import Subsonic, SubsonicError
-from .. import convert, folders, lyrics, organizer, rgscan, skins, smart, tagedit, updater
+from .. import art, convert, folders, libexport, lyrics, tagtools, organizer, rgscan, skins, smart, tagedit, updater
 from .album_grid import AlbumGrid
 from .dialogs import TagDialog
 from .audio_dialog import AudioDialog
 from .duplicates_dialog import DuplicatesDialog
+from .tagtools_dialog import TagToolsDialog
 from .tools_dialogs import ConvertDialog, MissingDialog, OrganizeDialog, ReplayGainDialog
 from .equalizer import EqualizerPanel
 from .mini import MiniPlayer
@@ -358,6 +359,8 @@ class MainWindow(PanelsMixin, QMainWindow):
         tl.addAction("&Organise Files…", self._organize)
         tl.addAction("&Convert…", self._convert)
         tl.addAction("Scan &ReplayGain…", self._scan_rg)
+        tl.addAction("&Batch Tag Tools…", self._tag_tools)
+        tl.addAction("&Export Library / Selection…", self._export_tracks)
         tl.addSeparator()
         tl.addAction("Find &Duplicates…", self._find_duplicates)
         tl.addAction("Find &Missing Files…", self._find_missing)
@@ -739,6 +742,10 @@ class MainWindow(PanelsMixin, QMainWindow):
             tm.addAction("Organise Files…", lambda: self._organize(local))
             tm.addAction("Convert…", lambda: self._convert(local))
             tm.addAction("Scan ReplayGain…", lambda: self._scan_rg(local))
+            tm.addAction("Batch Tag Tools…", lambda: self._tag_tools(local))
+            cm = m.addMenu("Cover Art")
+            cm.addAction("Set Cover from Image…", lambda: self._set_cover(local))
+            cm.addAction("Remove Embedded Cover", lambda: self._set_cover(local, remove=True))
         m.exec(self.table.viewport().mapToGlobal(pos))
 
     def _tree_menu(self, pos):
@@ -970,6 +977,57 @@ class MainWindow(PanelsMixin, QMainWindow):
         w = self._job(lambda prog: rgscan.scan_tracks(self.db, tr, prog, by_album=dlg.album.isChecked()),
                       "ReplayGain")
         w.done.connect(lambda r: (self._report("ReplayGain", r[0], r[1], "Tagged"), self._reload_tracks()))
+        self._run(w)
+
+    def _tag_tools(self, tracks=None):
+        tr = self._tool_tracks(tracks)
+        dlg = TagToolsDialog(tr, self)
+        if not dlg.exec():
+            return
+        ch = dlg.changes()
+        if not ch:
+            return
+        w = self._job(lambda prog: tagtools.apply_changes(self.db, ch, prog), "Batch Tag Tools")
+        w.done.connect(lambda r: (self._report("Batch Tag Tools", r[0], r[1], "Retagged"), self.load_source(keep=True)))
+        self._run(w)
+
+    def _export_tracks(self, _checked=False):
+        tr = self._selected() or self._visible_tracks()
+        path, _ = QFileDialog.getSaveFileName(self, "Export tracks", "hivefi-library.csv",
+                                              "Spreadsheet (*.csv);;JSON (*.json);;Playlist (*.m3u8)")
+        if not path:
+            return
+        w = self._job(lambda _p: libexport.export_any(tr, path), "Export")
+        w.done.connect(lambda n: self.statusBar().showMessage(f"Exported {n} track(s) to {path}", 8000))
+        self._run(w)
+
+    def _set_cover(self, tracks, remove=False):
+        from ..tagedit import remove_cover, write_cover
+        data = b""
+        if not remove:
+            path, _ = QFileDialog.getOpenFileName(self, "Choose cover image", "", "Images (*.jpg *.jpeg *.png)")
+            if not path:
+                return
+            data = Path(path).read_bytes()
+        def job(_p):
+            bad = []
+            for t in tracks:
+                try:
+                    (remove_cover(t["path"]) if remove else write_cover(t["path"], data))
+                    self.db.conn.execute("UPDATE tracks SET mtime=? WHERE id=?", (Path(t["path"]).stat().st_mtime, t["id"]))
+                    art.invalidate(t)
+                except Exception as e:  # noqa: BLE001
+                    bad.append(f'{Path(t["path"]).name}: {e}')
+            self.db.commit()
+            return bad
+        w = self._job(job, "Cover Art")
+        def done(bad):
+            self._report("Cover Art", len(tracks) - len(bad), bad, "Updated cover of")
+            cur = self.player.current
+            if cur:
+                self._on_track(cur)                              # redraw the now-playing art
+            self._refresh_grid()
+        w.done.connect(done)
         self._run(w)
 
     def _find_missing(self):

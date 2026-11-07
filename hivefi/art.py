@@ -45,6 +45,12 @@ def _folder_image(path) -> bytes | None:
     return None
 
 
+def invalidate(track: dict):
+    """Forget the cached cover of a local track's folder (after its embedded cover was changed)."""
+    if track.get("source") == "local" and track.get("path"):
+        (cache_dir() / ("local-" + hashlib.sha1(str(Path(track["path"]).parent).encode()).hexdigest())).unlink(missing_ok=True)
+
+
 def get_art(track: dict, api=None, size=0) -> bytes | None:
     """Return image bytes for a track dict, or None."""
     if track.get("source") == "local" and track.get("path"):

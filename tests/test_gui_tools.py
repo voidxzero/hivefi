@@ -58,3 +58,43 @@ def test_tools(win, monkeypatch, tmp_path):
     monkeypatch.setattr(mw.MissingDialog, "exec", lambda self: True)
     w._find_missing()
     assert len(db.all_tracks("local")) == 1
+
+
+def test_batch_tags_export_and_cover(win, monkeypatch, tmp_path):
+    import subprocess
+    from PyQt6.QtWidgets import QFileDialog
+    from hivefi import art, tagedit
+    w, db = win, win.db
+    local = db.all_tracks("local")
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+    # batch tag tools: lower-case the titles of two local files, then Title Case them back through the dialog
+    from hivefi.ui import main_window as mw
+    from hivefi.ui.tagtools_dialog import TagToolsDialog
+    dlg = TagToolsDialog(local)
+    dlg.op.setCurrentIndex(dlg.op.findData("lower")); dlg.field.setCurrentIndex(dlg.field.findData("title"))
+    assert dlg.count.text().startswith("2 of 2") and dlg.ok.isEnabled()                 # "L1", "L2" -> "l1", "l2"
+    dlg.op.setCurrentIndex(dlg.op.findData("find_replace")); dlg.find.setText("L"); dlg.repl.setText("song ")
+    assert dlg.table.rowCount() == 2 and dlg.ok.isEnabled()
+    dlg.regex.setChecked(True); dlg.find.setText("(")                       # a half-typed regex must not crash
+    assert dlg.table.rowCount() == 0 and not dlg.ok.isEnabled()
+    dlg.regex.setChecked(False); dlg.find.setText("L")
+    dlg.exec = lambda: True
+    monkeypatch.setattr(mw, "TagToolsDialog", lambda tracks, parent=None: dlg)          # use the configured dialog
+    w._tag_tools(); wait(1500)
+    assert sorted(t["title"] for t in db.all_tracks("local")) == ["song 1", "song 2"]
+    import mutagen
+    assert sorted(mutagen.File(t["path"], easy=True)["title"][0] for t in db.all_tracks("local")) == ["song 1", "song 2"]
+    # export the current view
+    out = tmp_path / "export.csv"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
+    w.source = ("local", None); w.load_source()
+    w._export_tracks(); wait(500)
+    assert out.exists() and out.read_text(encoding="utf-8-sig").count("\n") == 3
+    # embedded cover
+    png = tmp_path / "c.png"
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=green:s=16x16", "-frames:v", "1", str(png)], check=True)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (str(png), ""))
+    w._set_cover(db.all_tracks("local")); wait(1500)
+    assert all(art._embedded(t["path"])[:4] == b"\x89PNG" for t in db.all_tracks("local"))
+    w._set_cover(db.all_tracks("local"), remove=True); wait(1500)
+    assert all(art._embedded(t["path"]) is None for t in db.all_tracks("local"))
