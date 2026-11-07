@@ -970,9 +970,21 @@ class MainWindow(PanelsMixin, QMainWindow):
             a = self.skin_menu.addAction(name); a.setCheckable(True); a.setChecked(name == self.cfg.skin)
             grp.addAction(a); a.triggered.connect(lambda _c, n=name: self.set_skin(n))
         self.skin_menu.addSeparator()
+        self.skin_menu.addAction("Import Skin…", self._import_skin)
         self.skin_menu.addAction("Reload Skins", self._build_skin_menu)
         self.skin_menu.addAction("Open Skins Folder…",
                                  lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(skins.skins_dir()))))
+
+    def _import_skin(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Import skin", "", "Skins (*.json)")
+        if not path:
+            return
+        try:
+            name = skins.import_skin(path)
+        except (OSError, ValueError) as e:
+            QMessageBox.warning(self, "Import skin", f"Could not import that skin: {e}"); return
+        self._build_skin_menu(); self.set_skin(name)
+        self.statusBar().showMessage(f"Skin '{name}' imported", 5000)
 
     def set_skin(self, name):
         self.cfg.skin = name

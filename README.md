@@ -54,11 +54,11 @@ Work on the selected local tracks (or the whole local library when nothing is se
 - **Configurable columns**: right-click the table header to show/hide (Album Artist, Disc, Bitrate, Format, Added, Last Played…); drag to reorder; click stars in the Rating column to rate
 - **Auto Playlists**: built-ins (Recently Added/Played, Most Played, Top Rated, Never Played, Starred) and your own rule-based ones (File → New Auto Playlist…: any/all rules, limit, order)
 - **Mini player** (Ctrl+M), **tray icon** (optionally keep playing when the window is closed), **sleep timer**, full screen (F11)
-- **Skins** (View → Skin): Dark, Light, Classic, Midnight, AMOLED, Nord, Solarized Dark, plus your own
+- **Skins** (View → Skin): 31 built in. The originals (Dark, Light, Classic, Midnight, AMOLED, Nord, Solarized Dark), all ten **Spindle** skins (Modern Night, Luna Midnight, Olive Noir, Amp Classic, Aqua Deck, Ice Blue, Chrome Deck, Emerald Core, Classic 98 with its 3D bevels and Tahoma-style font, Vapor Dusk) and fourteen more (Dracula, Gruvbox Dark, Tokyo Night, Catppuccin Mocha, Rose Pine, One Dark, Monokai, Sunset, Cyberpunk, Forest, Slate Light, Solarized Light, Paper, High Contrast). Skins with gradient/border colours also restyle buttons, toolbars, panel titles, headers, scroll bars and tabs. **Import Skin…** takes a Hivefi skin or a skin file made for Spindle as it is.
 
 ### Writing a skin
 Drop a `.json` file in `~/.config/hivefi/skins/` (View → Skin → Open Skins Folder, then Reload Skins).
-All keys are optional: `name`, `base` (a built-in to inherit from), colours `window text base alt button highlight hl_text accent`,
+All keys are optional: `name`, `base` (a built-in to inherit from), colours `window text base alt button highlight hl_text accent` (plus, for the full gradient look, `panel_top panel_bot border hilite dim btn_top btn_bot title_top title_bot lcd_bg lcd_fg lcd_dim accent_text good warn bad`; Spindle-format files with a `colors` block work too),
 and `qss` (inline Qt stylesheet) or `qss_file` (path relative to the skin). See `data/skins/ocean.json`.
 
 ## Audio engine & audiophile settings

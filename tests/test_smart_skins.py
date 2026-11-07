@@ -1,3 +1,4 @@
+import pytest
 import json, os, sys, tempfile, time
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -54,3 +55,31 @@ def test_skins(tmp_path):
     for name in sk:
         assert skins.apply_skin(app, name, tmp_path)["accent"]
     assert skins.apply_skin(app, "does-not-exist", tmp_path)["accent"] == skins.BUILTIN["Dark"]["accent"]
+
+
+def test_skin_pack_and_spindle_import(tmp_path):
+    import json
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    allsk = skins.all_skins(tmp_path)
+    for name in ("Modern Night", "Luna Midnight", "Olive Noir", "Amp Classic", "Aqua Deck", "Ice Blue", "Chrome Deck",
+                 "Emerald Core", "Classic 98", "Vapor Dusk", "Dracula", "Tokyo Night", "Solarized Light", "High Contrast"):
+        assert name in allsk, name
+    assert len(allsk) >= 30
+    for name, t in allsk.items():                                    # every skin is complete and applies cleanly
+        assert all(k in t for k in skins.TOKENS), name
+        assert skins.apply_skin(app, name, tmp_path)["accent"] == t["accent"]
+    assert allsk["Classic 98"]["style"] == "classic98" and allsk["Vapor Dusk"]["r_panel"] == 4
+    # a skin file made for Spindle imports as it is, and inherits from a Spindle base skin
+    f = tmp_path / "mine.json"
+    f.write_text(json.dumps({"spindle_skin": 1, "name": "Mine", "base": "Vapor Dusk",
+                             "colors": {"accent": "#00ff00", "bg": "#101010"}, "corners": {"r": 8}}))
+    folder = tmp_path / "skins"; folder.mkdir()
+    assert skins.import_skin(str(f), folder) == "Mine"
+    t = skins.all_skins(folder)["Mine"]
+    assert t["accent"] == "#00ff00" and t["window"] == "#101010" and t["r"] == 8 and t["btn_top"] == "#43226a"
+    # junk is rejected rather than copied into the skins folder
+    bad = tmp_path / "bad.json"; bad.write_text('{"hello": 1}')
+    with pytest.raises(ValueError):
+        skins.import_skin(str(bad), folder)
+    assert sorted(p.name for p in folder.iterdir()) == ["mine.json"]
