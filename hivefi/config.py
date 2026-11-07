@@ -92,6 +92,18 @@ class Config:
     write_ratings: bool = False          # also store star ratings in local files' tags
     server_folders: list = field(default_factory=list)   # Subsonic music-folder ids to sync ([] = all libraries)
     server_folder_names: dict = field(default_factory=dict)   # id -> name of the server's libraries (last seen)
+    seek_style: str = "slider"           # slider | bar | waveform | wave_line
+    waveform_remote: bool = False        # also analyse streamed (server) tracks for the waveform: downloads the track
+    vis_style: str = "bars"              # bars | mirror | line | radial | spectrogram | vu
+    vis_enabled: bool = True             # put spectrum/level analysers in the audio chain (about 1% CPU)
+    vis_active: bool = False             # runtime only: a visualizer panel is visible
+    vis_bars: int = 48
+    vis_peaks: bool = True
+    layout_locked: bool = False          # panels/toolbars cannot be moved
+    layouts: dict = field(default_factory=dict)       # name -> saved window layout (base64)
+    split_state: str = ""                # main splitter (browser | table)
+    browser_state: str = ""              # Genre | Artist | Album splitter
+    resume_mode: str = "paused"          # off | paused | play: what to do with last session's queue on start
     check_updates: bool = True           # look for a newer version on GitHub at startup
     github_token: str = ""               # optional; needed to update from a private repo (else `gh auth token`)
 
@@ -153,6 +165,7 @@ class Config:
                 c.rg_mode = "track" if data["replaygain"] else "off"
             c.eq_user_presets = {n: (v if isinstance(v, dict) else {"bands": 10, "gains": list(v)})
                                  for n, v in c.eq_user_presets.items()}
+            c.vis_active = False                                     # runtime flag, never persisted as on
             if c.skin == "MusicBee Classic":                         # skin renamed with the app
                 c.skin = "Classic"
             if len(c.eq_gains) != c.eq_bands:

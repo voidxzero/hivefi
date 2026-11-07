@@ -5,6 +5,7 @@
   ReplayGain (`rgvolume`), resampling/dither/format control, bit-perfect mode, crossfeed, limiter, balance, mono.
 * Qt Multimedia: fallback when GStreamer is missing or a track fails to play (no DSP / gapless / crossfade).
 """
+import re
 import math
 import time
 
@@ -97,6 +98,32 @@ def out_caps(cfg):
     return ("audio/x-raw," + ",".join(fields)) if fields else None
 
 
+_NUM = r"-?[\d.]+(?:e[+-]?\d+)?|-?inf|nan"
+
+
+def _floats(txt: str, key: str):
+    m = re.search(rf"{key}=\(\w+\)[{{<]([^}}>]*)[}}>]", txt)      # GstValueList {..} or GValueArray <..>
+    return [float(x) if "inf" not in x and x != "nan" else -200.0
+            for x in re.findall(_NUM, m.group(1))] if m else []
+
+
+def parse_vis(structure):
+    """('spectrum', [dB per bin]) | ('level', {'rms': [dB/ch], 'peak': [dB/ch]}) | (None, None)."""
+    if structure is None:
+        return None, None
+    name = structure.get_name()
+    if name == "spectrum":
+        return "spectrum", _floats(structure.to_string(), "magnitude")
+    if name == "level":
+        txt = structure.to_string()
+        return "level", {"rms": _floats(txt, "rms"), "peak": _floats(txt, "peak")}
+    return None, None
+
+
+VIS_BANDS = 512                     # spectrum resolution (about 43 Hz per bin at 44.1 kHz)
+VIS_INTERVAL_NS = 33_000_000        # ~30 messages per second
+
+
 def chain_description(cfg) -> str:
     """gst bin description for the DSP chain implied by the settings."""
     caps = out_caps(cfg)
@@ -125,7 +152,12 @@ def chain_description(cfg) -> str:
         els += ["audioconvert", "audiopanorama name=pan method=simple"]
     if cfg.limiter and have("audiodynamic"):
         els += ["audioconvert", "audiodynamic name=dyn mode=compressor characteristics=hard-knee ratio=0"]
-    els += ["volume name=fade", "audioresample name=resamp",
+    els += ["volume name=fade"]
+    if cfg.vis_enabled and have("spectrum") and have("level"):      # transparent analysers for the visualizer
+        els += ["audioconvert", f"spectrum name=spec bands={VIS_BANDS} threshold=-80 interval={VIS_INTERVAL_NS} "
+                                "post-messages=false message-magnitude=true",
+                f"level name=lvl interval={VIS_INTERVAL_NS} post-messages=false"]
+    els += ["audioresample name=resamp",
             f"audioconvert name=outconv dithering={cfg.dither} noise-shaping={cfg.noise_shaping}"]
     if caps:
         els.append(_caps(caps))
@@ -156,6 +188,9 @@ def apply_chain_settings(h: dict, cfg):
         h["bs2b"].set_property("feed", feed)
     if h.get("resamp") is not None:
         h["resamp"].set_property("quality", int(cfg.resample_quality))
+    for n in ("spec", "lvl"):
+        if h.get(n) is not None:
+            h[n].set_property("post-messages", bool(cfg.vis_active))
 
 
 # --------------------------------------------------------------------------- output devices
@@ -232,7 +267,7 @@ class Deck:
         self.pipe.set_property("audio-filter", chain)
         self.pipe.set_property("audio-sink", make_sink(cfg.output_device, cfg.buffer_ms))
         self.h = {n: chain.get_by_name(n) for n in ("rg", "eq", "swap", "bs2b", "pan", "dyn", "fade",
-                                                     "resamp", "outconv", "inconv") if chain.get_by_name(n)}
+                                                     "resamp", "outconv", "inconv", "spec", "lvl") if chain.get_by_name(n)}
         self.sig = chain_signature(cfg)
         self.level = 1.0
         self.prerolled = False
@@ -280,6 +315,7 @@ class GstEngine(QObject):
     errorOccurred = pyqtSignal(str)
     advanced = pyqtSignal()          # the engine already moved on to the queued "next" track by itself
     notice = pyqtSignal(str)
+    visData = pyqtSignal(object, object)     # (spectrum dB list | None, {'rms','peak'} | None) ~30x per second
 
     def __init__(self, cfg, parent=None):
         super().__init__(parent)
@@ -355,6 +391,14 @@ class GstEngine(QObject):
         self._timer.stop()
         self._set_state(PS.StoppedState)
         self.positionChanged.emit(0)
+
+    def preload_paused(self, ms=0):
+        """Load the current source and sit paused at `ms` (restoring a session without making a sound)."""
+        for d in self._live_decks():
+            d.pipe.set_state(Gst.State.PAUSED)
+        self._pending_seek = int(ms) if ms else None
+        self._set_state(PS.PausedState)
+        self._timer.start()
 
     def position(self) -> int:
         return self.cur.position()
@@ -568,8 +612,14 @@ class GstEngine(QObject):
                     self._preloaded = None
                     self._xf_planned = False
                     self.notice.emit(f"Crossfade is unavailable on this output ({err.message}); using gapless.")
+        mags = lv = None
         while (m := cur.bus.pop()) is not None:
             t = m.type
+            if t == Gst.MessageType.ELEMENT:
+                kind, val = parse_vis(m.get_structure())
+                if kind == "spectrum": mags = val
+                elif kind == "level": lv = val
+                continue
             if t == Gst.MessageType.EOS:
                 cur.pipe.set_state(Gst.State.NULL)
                 self._timer.stop()
@@ -597,6 +647,8 @@ class GstEngine(QObject):
                     flags = Gst.SeekFlags.FLUSH | (Gst.SeekFlags.ACCURATE if self.cfg.seek_accurate
                                                    else Gst.SeekFlags.KEY_UNIT)
                     cur.pipe.seek_simple(Gst.Format.TIME, flags, ms * Gst.MSECOND)
+        if mags is not None or lv is not None:
+            self.visData.emit(mags, lv)
         if self._state != PS.PlayingState:
             return
         if not self._duration:
@@ -638,6 +690,7 @@ class Backend(QObject):
     engineChanged = pyqtSignal(str)          # "qt" | "gst"
     advanced = pyqtSignal()
     notice = pyqtSignal(str)
+    visData = pyqtSignal(object, object)
 
     def __init__(self, cfg, parent=None):
         super().__init__(parent)
@@ -664,6 +717,7 @@ class Backend(QObject):
             g.mediaStatusChanged.connect(lambda s: self._fwd(g, self.mediaStatusChanged, s))
             g.advanced.connect(lambda: self._fwd(g, self.advanced))
             g.notice.connect(self.notice)
+            g.visData.connect(lambda a, b: self._fwd(g, self.visData, a, b))
             g.errorOccurred.connect(self._gst_error)
 
     @property
@@ -694,6 +748,14 @@ class Backend(QObject):
 
     def play(self): self.active.play()
     def pause(self): self.active.pause()
+
+    def preload_paused(self, ms=0):
+        if self.active is self.gst:
+            self.gst.preload_paused(ms)
+        else:
+            self.active.pause()
+            if ms:
+                self.active.setPosition(ms)
     def stop(self): self.active.stop()
     def position(self): return self.active.position()
     def setPosition(self, ms): self.active.setPosition(int(ms))

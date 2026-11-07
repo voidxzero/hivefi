@@ -86,6 +86,15 @@ class SettingsDialog(QDialog):
         self.updates = QCheckBox("Check for updates on startup"); self.updates.setChecked(cfg.check_updates)
         self.gh_token = QLineEdit(cfg.github_token); self.gh_token.setEchoMode(QLineEdit.EchoMode.Password)
         self.gh_token.setPlaceholderText("GitHub token (optional; defaults to the gh CLI login)")
+        self.resume = QComboBox()
+        for label, v in (("Reopen the last queue, paused at the saved position", "paused"),
+                         ("Reopen the last queue and keep playing if it was playing", "play"),
+                         ("Don't restore the queue", "off")):
+            self.resume.addItem(label, v)
+        self.resume.setCurrentIndex(max(0, self.resume.findData(cfg.resume_mode)))
+        self.vis_on = QCheckBox("Visualizer analysers in the audio chain (about 1% CPU)")
+        self.vis_on.setChecked(cfg.vis_enabled)
+        gl.addWidget(QLabel("On start:")); gl.addWidget(self.resume); gl.addWidget(self.vis_on)
         gl.addWidget(self.tray); gl.addWidget(self.close_tray); gl.addWidget(self.updates); gl.addWidget(self.gh_token)
         gl.addStretch()
         tabs.addTab(gen, "General")
@@ -169,6 +178,7 @@ class SettingsDialog(QDialog):
         c.server_folders, names = self.chosen_server_folders()
         if names:
             c.server_folder_names = names
+        c.resume_mode, c.vis_enabled = self.resume.currentData(), self.vis_on.isChecked()
         c.write_ratings = self.write_rt.isChecked()
         c.check_updates, c.github_token = self.updates.isChecked(), self.gh_token.text().strip()
         c.save()

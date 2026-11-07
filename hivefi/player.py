@@ -92,6 +92,30 @@ class Player(QObject):
         self.queueChanged.emit()
         self._load(start, manual)
 
+    def restore(self, tracks, index, position_ms=0, play=False):
+        """Bring back a saved queue: the track is loaded (paused at position_ms unless play=True)."""
+        if not tracks or not 0 <= index < len(tracks):
+            return
+        self.queue = list(tracks)
+        self.index = index
+        self._reorder()
+        self.queueChanged.emit()
+        t = self.queue[index]
+        self._counted = position_ms > 0
+        self._apply_volume()
+        self.mp.setSource(self.resolve(t))
+        self.trackChanged.emit(t)
+        if play:
+            self.mp.play()
+            if position_ms:
+                self.mp.setPosition(position_ms)
+            self.nowPlaying.emit(t)
+        else:
+            self.mp.preload_paused(position_ms)             # prerolls the track so the seek works
+            if position_ms:
+                self.positionChanged.emit(position_ms)
+        self._update_next()
+
     def enqueue(self, tracks, next_=False):
         if next_ and self.index >= 0:
             at = self.index + 1

@@ -27,6 +27,9 @@ from .duplicates_dialog import DuplicatesDialog
 from .tools_dialogs import ConvertDialog, MissingDialog, OrganizeDialog, ReplayGainDialog
 from .equalizer import EqualizerPanel
 from .mini import MiniPlayer
+from .panels_mixin import PanelsMixin
+from .seekbar import STYLES as SEEK_STYLES
+from .visualizer import STYLES as VIS_STYLES
 from .models import COLUMNS, DEFAULT_HIDDEN, MIME, TrackModel, fmt_time
 from .panels import LyricsPanel, NowPlayingPanel, TrackInfoPanel, UpNextPanel
 from .smart_dialog import SmartDialog
@@ -81,7 +84,7 @@ class SourceTree(QTreeWidget):
             e.acceptProposedAction()
 
 
-class MainWindow(QMainWindow):
+class MainWindow(PanelsMixin, QMainWindow):
     def __init__(self, cfg: Config, db: Database):
         super().__init__()
         self.cfg, self.db = cfg, db
@@ -119,6 +122,9 @@ class MainWindow(QMainWindow):
         if cfg.header_state:
             self.table.horizontalHeader().restoreState(QByteArray.fromBase64(cfg.header_state.encode()))
             self._sorted_once = True
+        self._set_locked(cfg.layout_locked, save=False)
+        QTimer.singleShot(0, self._restore_splits)               # needs the window laid out at its final size
+        self._start_autosave()
         self._set_view_mode(cfg.view_mode, initial=True)
         self._apply_skin_visuals()
         self.sleep_timer = QTimer(self, singleShot=True, timeout=self._sleep_fire)
@@ -128,7 +134,7 @@ class MainWindow(QMainWindow):
         self.refresh_playlists()
         self.status_lbl.setText("Loading library…")
         w = Worker(lambda _p: len(self.db.all_tracks()), self)       # fill the track cache off the UI thread
-        w.done.connect(lambda _n: (self.load_source(), self._startup()))
+        w.done.connect(lambda _n: (self._restore_session(), self._startup()))
         w.failed.connect(lambda _e: (self.load_source(), self._startup()))
         self._run(w)
 
@@ -155,45 +161,7 @@ class MainWindow(QMainWindow):
         return self.style().standardIcon(sp)
 
     def _build_ui(self):
-        S = QStyle.StandardPixmap
-        tb = QToolBar("Transport"); tb.setMovable(False); tb.setIconSize(QSize(24, 24))
-        self.addToolBar(tb)
-        self.act_prev = tb.addAction(self._icon(S.SP_MediaSkipBackward), "Previous", self.player.previous)
-        self.act_play = tb.addAction(self._icon(S.SP_MediaPlay), "Play/Pause", self.player.toggle)
-        self.act_stop = tb.addAction(self._icon(S.SP_MediaStop), "Stop", self.player.stop)
-        self.act_next = tb.addAction(self._icon(S.SP_MediaSkipForward), "Next", self.player.next)
-        tb.addSeparator()
-        self.btn_shuffle = QPushButton("Shuffle"); self.btn_shuffle.setCheckable(True)
-        self.btn_shuffle.setChecked(self.cfg.shuffle); self.btn_shuffle.toggled.connect(self._set_shuffle)
-        self.btn_repeat = QPushButton(); self.btn_repeat.clicked.connect(self._cycle_repeat)
-        self._update_repeat_label()
-        tb.addWidget(self.btn_shuffle); tb.addWidget(self.btn_repeat)
-        tb.addSeparator()
-        self.lbl_pos = QLabel("0:00"); self.lbl_pos.setMinimumWidth(44)
-        self.seek = QSlider(Qt.Orientation.Horizontal); self.seek.setMinimumWidth(260)
-        self.seek.sliderMoved.connect(self.player.seek)
-        self.lbl_dur = QLabel("0:00"); self.lbl_dur.setMinimumWidth(44)
-        for w in (self.lbl_pos, self.seek, self.lbl_dur):
-            tb.addWidget(w)
-        tb.addSeparator()
-        vol_icon = QLabel(); vol_icon.setPixmap(self._icon(S.SP_MediaVolume).pixmap(18, 18))
-        self.vol = QSlider(Qt.Orientation.Horizontal); self.vol.setRange(0, 100); self.vol.setFixedWidth(100)
-        self.vol.setValue(self.cfg.volume); self.vol.valueChanged.connect(self._set_volume)
-        tb.addWidget(vol_icon); tb.addWidget(self.vol)
-        tb.addSeparator()
-        self.search = QLineEdit(); self.search.setPlaceholderText("Search…"); self.search.setClearButtonEnabled(True)
-        self.search.setFixedWidth(220); self.search.textChanged.connect(lambda _t: self._search_timer.start())
-        self._search_timer = QTimer(self, singleShot=True, interval=180,
-                                    timeout=lambda: self._on_search(self.search.text()))
-        tb.addWidget(self.search)
-
-        # view mode buttons
-        tb.addSeparator()
-        self.mode_group = QActionGroup(self)
-        self.act_browser = tb.addAction("Columns"); self.act_albums = tb.addAction("Albums")
-        for act, mode in ((self.act_browser, "browser"), (self.act_albums, "albums")):
-            act.setCheckable(True); self.mode_group.addAction(act)
-            act.triggered.connect(lambda _c, m=mode: self._set_view_mode(m))
+        self._build_toolbars()
 
         # sources tree
         self.tree = SourceTree(); self.tree.setHeaderHidden(True)
@@ -204,7 +172,7 @@ class MainWindow(QMainWindow):
 
         # column browser
         self.lists = {}
-        browser = QSplitter(Qt.Orientation.Horizontal)
+        browser = self.browser_split = QSplitter(Qt.Orientation.Horizontal)
         for name in ("genre", "artist", "album"):
             lw = QListWidget(); lw.setObjectName(name); lw.setUniformItemSizes(True)
             lw.currentRowChanged.connect(lambda _r, n=name: self._on_browser(n))
@@ -262,8 +230,9 @@ class MainWindow(QMainWindow):
         self.eq_panel = EqualizerPanel(self.cfg, self.player.mp.eq_available)
         self.dock_eq = self._dock("Equalizer", self.eq_panel, "dock_eq", R)
         self.tabifyDockWidget(self.dock_next, self.dock_lyrics); self.tabifyDockWidget(self.dock_lyrics, self.dock_info)
-        self.tabifyDockWidget(self.dock_info, self.dock_eq)
-        for d in (self.dock_next, self.dock_lyrics, self.dock_info, self.dock_eq):
+        self._build_visualizer()
+        self.tabifyDockWidget(self.dock_info, self.dock_eq); self.tabifyDockWidget(self.dock_eq, self.dock_vis)
+        for d in (self.dock_next, self.dock_lyrics, self.dock_info, self.dock_eq, self.dock_vis):
             d.hide()
         self.dock_np.setMinimumHeight(200)
         self.dock_lyrics.visibilityChanged.connect(lambda v: v and self._refresh_lyrics())
@@ -319,9 +288,29 @@ class MainWindow(QMainWindow):
         v.addSeparator()
         self.lib_menu = v.addMenu("Libraries"); self.lib_menu.aboutToShow.connect(self._build_lib_menu)
         pm = v.addMenu("Panels")
-        for d in (self.dock_sources, self.dock_np, self.dock_next, self.dock_lyrics, self.dock_info, self.dock_eq):
+        for d in (self.dock_sources, self.dock_np, self.dock_next, self.dock_lyrics, self.dock_info, self.dock_eq,
+                  self.dock_vis):
             pm.addAction(d.toggleViewAction())
-        pm.addSeparator(); pm.addAction("Reset Layout", self._reset_layout)
+        pm.addSeparator()
+        for tb in self.toolbars:
+            pm.addAction(tb.toggleViewAction())
+        pm.addSeparator()
+        self.act_lock = pm.addAction("Lock Layout"); self.act_lock.setCheckable(True)
+        self.act_lock.setChecked(self.cfg.layout_locked); self.act_lock.toggled.connect(self._set_locked)
+        pm.addAction("Reset Layout", self._reset_layout)
+        self.layout_menu = v.addMenu("Layouts"); self.layout_menu.aboutToShow.connect(self._build_layout_menu)
+        sm = v.addMenu("Seek Bar Style"); sg = QActionGroup(self)
+        for key, label in SEEK_STYLES.items():
+            a = sm.addAction(label); a.setCheckable(True); a.setChecked(key == self.cfg.seek_style); sg.addAction(a)
+            a.triggered.connect(lambda _c, k=key: self._set_seek_style(k))
+        sm.addSeparator()
+        a = sm.addAction("Analyse streamed tracks too (downloads them)"); a.setCheckable(True)
+        a.setChecked(self.cfg.waveform_remote); a.toggled.connect(self._set_waveform_remote)
+        vm = v.addMenu("Visualizer Style"); vg = QActionGroup(self)
+        for key, label in VIS_STYLES.items():
+            a = vm.addAction(label); a.setCheckable(True); a.setChecked(key == self.cfg.vis_style); vg.addAction(a)
+            a.triggered.connect(lambda _c, k=key: self._set_vis_style(k))
+        vm.addSeparator(); vm.addAction("Show Visualizer", self.dock_vis.show)
         v.addAction("Columns View", lambda: self._set_view_mode("browser"))
         v.addAction("Albums View", lambda: self._set_view_mode("albums"))
         self.skin_menu = v.addMenu("Skin"); self._build_skin_menu()
@@ -521,8 +510,9 @@ class MainWindow(QMainWindow):
         self._refresh_next()
         self.np_panel.set_track(t)
         if not t:
-            self.setWindowTitle("Hivefi"); self.mini.art.set_art(None); return
+            self.setWindowTitle("Hivefi"); self.mini.art.set_art(None); self.seek.set_peaks(None); return
         self._refresh_lyrics()
+        self._load_waveform(t)
         self.setWindowTitle(f'{t["artist"]} – {t["title"]}')
         self._art_token += 1
         token, tcopy, api = self._art_token, dict(t), self.api
@@ -732,6 +722,7 @@ class MainWindow(QMainWindow):
         self._eq_timer.start()
 
     def _engine_changed(self, e):
+        self._update_vis_availability()
         self.eq_panel.set_status("Audio engine: GStreamer" if e == "gst" else
                                  "Audio engine: Qt Multimedia (no equalizer, gapless or crossfade)")
 
@@ -908,9 +899,7 @@ class MainWindow(QMainWindow):
         return d
 
     def _reset_layout(self):
-        self.restoreState(self._default_state)
-        for d in (self.dock_sources, self.dock_np): d.show()
-        for d in (self.dock_next, self.dock_lyrics, self.dock_info, self.dock_eq): d.hide()
+        self._apply_builtin_layout("Default")
 
     def _refresh_next(self):
         if self.dock_next.isVisible():
@@ -1261,6 +1250,7 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self.cfg, self)
         if dlg.exec():
             dlg.apply(); self._rebuild_api(); self._apply_sync_timer()
+            self.player.configure(); self._update_vis_availability()
             self._after_library_change()
             self.scan_library(quiet=True)
             if self.api: self.sync_now(silent=True)
@@ -1269,10 +1259,7 @@ class MainWindow(QMainWindow):
         if self.cfg.close_to_tray and self.tray and self.tray.isVisible() and not self._quitting:
             self.hide(); e.ignore(); return
         self._closing = True                                     # lets a running scan stop early
-        self.cfg.geometry = bytes(self.saveGeometry().toBase64()).decode()
-        self.cfg.state = bytes(self.saveState().toBase64()).decode()
-        self.cfg.header_state = bytes(self.table.horizontalHeader().saveState().toBase64()).decode()
-        self.cfg.save()
+        self._save_session()
         if self.tray: self.tray.hide()
         self.mini.hide()
         self.player.mp.shutdown()

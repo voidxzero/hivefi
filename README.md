@@ -27,6 +27,12 @@ Work on the selected local tracks (or the whole local library when nothing is se
 - **Find Duplicates / Find Missing Files:** library clean-up (files are never deleted).
 - **Save Queue as Playlist** (File menu and the Now Playing source), and **Make Editable Copy** of any built-in auto playlist (right-click it).
 
+## Panels, seek bar, visualizer, session
+- **Every control is a movable panel.** Controls, Seek Bar, Volume, Search and View Mode are toolbars you can drag (by their grip) to any edge of the window or float; Sources, Now Playing, Up Next, Lyrics, Track Info, Equalizer and Visualizer are docks (drag, float, tab, split). View → Panels toggles each one, **Lock Layout** freezes everything and hides the title bars, **View → Layouts** has built-in layouts (Default, Minimal, Now Playing focus, Everything) plus any layouts you save under a name.
+- **Seek bar styles** (View → Seek Bar Style): Slider, Progress bar, **Waveform**, Waveform outline. Click anywhere to jump there; dragging scrubs. Waveforms are analysed with ffmpeg in the background and cached; streamed tracks are only analysed if you tick "Analyse streamed tracks too" (it downloads them).
+- **Visualizer** (View → Panels → Visualizer; right-click for options): Spectrum bars, Mirrored bars, Spectrum line, Radial, Spectrogram, VU meters, driven by GStreamer `spectrum`/`level` analysers (log frequency axis, peak caps, attack/release smoothing). Unavailable in bit-perfect mode and with the Qt engine.
+- **Starts where you left off:** window geometry, panel/toolbar positions and sizes, splitters, column layout, the selected source, search text, Genre/Artist/Album selection, scroll position, and the queue with the playing track and position (reopened paused by default; Preferences → General → On start can resume playback or skip it). Saved on exit and every 30 seconds.
+
 ## Features
 - Classic library layout: source tree, Genre → Artist → Album column browser, sortable track table, now-playing art panel
 - Local library scan (mp3/flac/ogg/opus/m4a/wav/…) via mutagen; incremental rescans; embedded/folder cover art
