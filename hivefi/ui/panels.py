@@ -124,6 +124,7 @@ class UpNextPanel(QWidget):
 
 class LyricsPanel(QWidget):
     seekRequested = pyqtSignal(int)         # ms: a synced line was double-clicked
+    searchOnline = pyqtSignal()             # the user asked to look these lyrics up on the internet
 
     def __init__(self):
         super().__init__()
@@ -136,8 +137,18 @@ class LyricsPanel(QWidget):
         self.stack = QStackedWidget(); self.stack.addWidget(self.body); self.stack.addWidget(self.lines)
         self.times: list[int] = []
         self._cur = -1
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._menu)
+        self.body.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        self.lines.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         lay = QVBoxLayout(self); lay.setContentsMargins(4, 4, 4, 4)
         lay.addWidget(self.head); lay.addWidget(self.stack)
+
+    def _menu(self, pos):
+        from PyQt6.QtWidgets import QMenu
+        m = QMenu(self)
+        m.addAction("Search for these lyrics online (LRCLIB)", self.searchOnline.emit)
+        m.exec(self.mapToGlobal(pos))
 
     @property
     def synced(self) -> bool:

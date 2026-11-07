@@ -33,6 +33,11 @@ def win(tmp_path, monkeypatch):
     cfg.show_tray = False
     from hivefi.ui.main_window import MainWindow
     w = MainWindow(cfg, Database(tmp_path / "l.db")); w.show(); wait(3500)
+    waited = 0
+    while waited < 20000 and not (len(w.db.all_tracks("local")) == 2 and len(w.db.all_tracks("remote")) == 7
+                                  and not w.status_lbl.text().startswith("Loading")):
+        wait(200); waited += 200                                        # a loaded machine needs longer to scan and sync
+    wait(300)
     w._st = st
     yield w
     w.close(); srv.shutdown()

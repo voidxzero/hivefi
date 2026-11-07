@@ -19,12 +19,13 @@ from ..db import Database
 from ..mpris import Mpris
 from ..player import Player
 from ..subsonic import Subsonic, SubsonicError
-from .. import art, convert, folders, libexport, listenbrainz, lyrics, radio, tagtools, organizer, rgscan, skins, smart, tagedit, updater
+from .. import art, convert, coverart, folders, stats as libstats, libexport, listenbrainz, lyrics, radio, tagtools, organizer, rgscan, skins, smart, tagedit, updater
 from .album_grid import AlbumGrid
 from .dialogs import TagDialog
 from .audio_dialog import AudioDialog
 from .duplicates_dialog import DuplicatesDialog
 from . import shortcuts
+from .stats_dialog import StatsDialog
 from .station_dialog import StationDialog
 from .tagtools_dialog import TagToolsDialog
 from .tools_dialogs import ConvertDialog, MissingDialog, OrganizeDialog, ReplayGainDialog
@@ -366,9 +367,11 @@ class MainWindow(PanelsMixin, QMainWindow):
         tl.addAction("&Organise Files…", self._organize)
         tl.addAction("&Convert…", self._convert)
         tl.addAction("Scan &ReplayGain…", self._scan_rg)
+        tl.addAction("Find Cover Art &Online…", self._find_covers_online)
         tl.addAction("&Batch Tag Tools…", self._tag_tools)
         tl.addAction("&Export Library / Selection…", self._export_tracks)
         tl.addSeparator()
+        tl.addAction("Library &Statistics…", self._show_stats)
         tl.addAction("Find &Duplicates…", self._find_duplicates)
         tl.addAction("Find &Missing Files…", self._find_missing)
         h = mb.addMenu("&Help")
@@ -378,6 +381,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         P = self.player
         P.positionChanged.connect(self.lyrics_panel.set_position)
         self.lyrics_panel.seekRequested.connect(P.seek)
+        self.lyrics_panel.searchOnline.connect(lambda: self._refresh_lyrics(force_online=True))
         P.streamTitle.connect(self._on_stream_title)
         P.trackChanged.connect(self._on_track)
         P.stateChanged.connect(lambda pl: self.act_play.setIcon(
@@ -398,6 +402,7 @@ class MainWindow(PanelsMixin, QMainWindow):
             it = QTreeWidgetItem(parent, [text]); it.setData(0, Qt.ItemDataRole.UserRole, data); return it
         lib = item(self.tree, "Library", None)
         self._items = {("all", None): item(lib, "All Music", ("all", None)),
+                       ("history", None): item(lib, "Play History", ("history", None)),
                        ("local", None): item(lib, "This Computer", ("local", None))}
         if self.cfg.server_configured:
             nav = item(lib, "Navidrome" if self.cfg.server_enabled else "Navidrome (off)", ("remote", None))
@@ -557,6 +562,8 @@ class MainWindow(PanelsMixin, QMainWindow):
         if kind == "all": tracks = self._tracks()
         elif kind == "remote" and arg is not None:
             tracks = [t for t in self._tracks("remote") if t.get("folder_id") == arg]
+        elif kind == "history":
+            tracks = self.cfg.enabled_tracks(self.db.play_history())
         elif kind == "radio":
             stations = self.db.radio_stations()
             tracks = [radio.radio_track(s) for s in stations if arg is None or s["id"] == arg]
@@ -571,7 +578,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         saved = (m.genre, m.artist, m.album) if keep else (None, None, None)
         m.genre = m.artist = m.album = m.ids = None
         hh = self.table.horizontalHeader()
-        if kind in ("queue", "playlist", "smart", "folder", "radio"):   # these keep their own order
+        if kind in ("queue", "playlist", "smart", "folder", "radio", "history"):   # these keep their own order
             hh.setSortIndicatorShown(False)
             m.set_tracks(tracks, sort_col=None)
         else:
@@ -591,7 +598,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         self._sel_changed()
 
     def _header_sort(self, section):
-        if self.source[0] in ("queue", "playlist", "smart", "folder", "radio") or section in (0,):
+        if self.source[0] in ("queue", "playlist", "smart", "folder", "radio", "history") or section in (0,):
             return
         hh = self.table.horizontalHeader()
         desc = hh.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder if hh.sortIndicatorSection() == section else False
@@ -824,6 +831,7 @@ class MainWindow(PanelsMixin, QMainWindow):
             tm.addAction("Batch Tag Tools…", lambda: self._tag_tools(local))
             cm = m.addMenu("Cover Art")
             cm.addAction("Set Cover from Image…", lambda: self._set_cover(local))
+            cm.addAction("Find Online…", lambda: self._find_covers_online(local, only_missing=False))
             cm.addAction("Remove Embedded Cover", lambda: self._set_cover(local, remove=True))
         m.exec(self.table.viewport().mapToGlobal(pos))
 
@@ -834,7 +842,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         if d and d[0] == "playlist":
             pid = d[1]
             m.addAction("Rename…", lambda: self._rename_playlist(pid))
-            m.addAction("Export as M3U…", lambda: self._export_m3u(pid))
+            m.addAction("Export Playlist…", lambda: self._export_m3u(pid))
             m.addAction("Delete", lambda: self._delete_playlist(pid))
             if self.api:
                 pl = next(p for p in self.db.playlists() if p["id"] == pid)
@@ -1085,6 +1093,28 @@ class MainWindow(PanelsMixin, QMainWindow):
         w.done.connect(lambda n: self.statusBar().showMessage(f"Exported {n} track(s) to {path}", 8000))
         self._run(w)
 
+    def _find_covers_online(self, tracks=None, only_missing=True):
+        tr = self._tool_tracks(tracks)
+        if QMessageBox.question(self, "Find cover art online",
+                                f"Look up the covers of {len({t.get('_ak') for t in tr})} album(s) on MusicBrainz and the "
+                                "Cover Art Archive? Their names are sent to those services (about one request per second) "
+                                "and found covers are embedded in the files."
+                                + (" Albums that already have a cover are skipped." if only_missing else "")) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        w = self._job(lambda prog: coverart.find_covers(tr, only_missing, prog), "Cover art")
+        def done(r):
+            n, missing, errors = r
+            self.statusBar().showMessage(f"Cover art: {n} album(s) updated, {len(missing)} not found", 10000)
+            if errors:
+                QMessageBox.warning(self, "Cover art", "\n".join(errors[:12]))
+            cur = self.player.current
+            if cur:
+                self._on_track(cur)
+            self._refresh_grid()
+        w.done.connect(done)
+        self._run(w)
+
     def _set_cover(self, tracks, remove=False):
         from ..tagedit import remove_cover, write_cover
         data = b""
@@ -1113,6 +1143,10 @@ class MainWindow(PanelsMixin, QMainWindow):
             self._refresh_grid()
         w.done.connect(done)
         self._run(w)
+
+    def _show_stats(self):
+        s = libstats.compute(self._tracks(), self.db.plays_since(0))
+        StatsDialog(libstats.render_html(s), self).exec()
 
     def _find_missing(self):
         import os
@@ -1411,20 +1445,17 @@ class MainWindow(PanelsMixin, QMainWindow):
 
     def _export_m3u(self, pid):
         pl = next(p for p in self.db.playlists() if p["id"] == pid)
-        path, _ = QFileDialog.getSaveFileName(self, "Export playlist", pl["name"] + ".m3u8", "Playlists (*.m3u8)")
+        path, _ = QFileDialog.getSaveFileName(self, "Export playlist", pl["name"] + ".m3u8",
+                                              "M3U playlist (*.m3u8);;PLS playlist (*.pls);;XSPF playlist (*.xspf)")
         if not path: return
-        lines = ["#EXTM3U"]
-        for t in self.db.playlist_tracks(pid):
-            if t["source"] == "local":
-                lines += [f'#EXTINF:{int(t["duration"])},{t["artist"]} - {t["title"]}', t["path"]]
-        Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.statusBar().showMessage("Exported local tracks (server tracks have no file path)", 6000)
+        n = libexport.export_any(self.db.playlist_tracks(pid), path)
+        self.statusBar().showMessage(f"Exported {n} local track(s) (server tracks have no file path)", 6000)
 
     def show_lyrics(self):
         self.dock_lyrics.show(); self.dock_lyrics.raise_()
         self._refresh_lyrics()
 
-    def _refresh_lyrics(self):
+    def _refresh_lyrics(self, force_online=False):
         if not self.dock_lyrics.isVisible(): return
         t = self.player.current
         if not t:
@@ -1432,7 +1463,9 @@ class MainWindow(PanelsMixin, QMainWindow):
         tc, api = dict(t), self.api
         title = f'{t["artist"]} – {t["title"]}'
         self.lyrics_panel.show_lyrics(title, "Loading…")
-        w = Worker(lambda _p: lyrics.find_lyrics(tc, api), self)
+        online = force_online or self.cfg.lyrics_online
+        save = self.cfg.lyrics_save_sidecar
+        w = Worker(lambda _p: lyrics.find_lyrics(tc, api, online=online, save_sidecar=save), self)
         w.done.connect(lambda txt, tid=t["id"]: self.player.current and self.player.current["id"] == tid
                        and self.lyrics_panel.show_lyrics(title, txt))
         self._run(w)

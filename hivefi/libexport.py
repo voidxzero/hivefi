@@ -51,9 +51,39 @@ def export_m3u(tracks, path):
     return n
 
 
+def export_pls(tracks, path):
+    local = [t for t in tracks if t.get("source") == "local" and t.get("path")]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("[playlist]\n")
+        for i, t in enumerate(local, 1):
+            f.write(f"File{i}={t['path']}\nTitle{i}={t.get('artist', '')} - {t.get('title', '')}\n"
+                    f"Length{i}={int(t.get('duration') or 0)}\n")
+        f.write(f"NumberOfEntries={len(local)}\nVersion=2\n")
+    return len(local)
+
+
+def export_xspf(tracks, path, title="Hivefi playlist"):
+    from urllib.parse import quote
+    from xml.sax.saxutils import escape
+    local = [t for t in tracks if t.get("source") == "local" and t.get("path")]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('<?xml version="1.0" encoding="UTF-8"?>\n<playlist version="1" xmlns="http://xspf.org/ns/0/">\n'
+                f"  <title>{escape(title)}</title>\n  <trackList>\n")
+        for t in local:
+            f.write(f"    <track><location>file://{quote(t['path'])}</location><title>{escape(str(t.get('title', '')))}</title>"
+                    f"<creator>{escape(str(t.get('artist', '')))}</creator><album>{escape(str(t.get('album', '')))}</album>"
+                    f"<duration>{int((t.get('duration') or 0) * 1000)}</duration></track>\n")
+        f.write("  </trackList>\n</playlist>\n")
+    return len(local)
+
+
 def export_any(tracks, path, keys=None):
-    """Pick the format from the file extension (.csv / .json / .m3u8 / .m3u)."""
+    """Pick the format from the file extension (.csv / .json / .m3u8 / .m3u / .pls / .xspf)."""
     ext = str(path).lower().rsplit(".", 1)[-1]
+    if ext == "pls":
+        return export_pls(tracks, path)
+    if ext == "xspf":
+        return export_xspf(tracks, path)
     if ext == "json":
         return export_json(tracks, path, keys)
     if ext in ("m3u", "m3u8"):

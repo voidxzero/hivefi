@@ -269,6 +269,12 @@ class SettingsDialog(QDialog):
         lbrow = QHBoxLayout(); lbrow.addWidget(self.lb_token, 1); lbrow.addWidget(lb_test)
         gl.addWidget(QLabel("Scrobble plays to ListenBrainz (listenbrainz.org → Settings → User token):"))
         gl.addLayout(lbrow); gl.addWidget(self.lb_url); gl.addWidget(self.lb_status)
+        self.ly_online = QCheckBox("Look up lyrics online (LRCLIB) when a track has none")
+        self.ly_online.setToolTip("Sends the artist, title, album and length to lrclib.net")
+        self.ly_online.setChecked(cfg.lyrics_online)
+        self.ly_save = QCheckBox("Save found lyrics as a .lrc / .txt file next to the song")
+        self.ly_save.setChecked(cfg.lyrics_save_sidecar)
+        gl.addWidget(self.ly_online); gl.addWidget(self.ly_save)
         gl.addWidget(self.tray); gl.addWidget(self.close_tray); gl.addWidget(self.updates); gl.addWidget(self.gh_token)
         gl.addStretch()
         tabs.addTab(gen, "General")
@@ -371,6 +377,7 @@ class SettingsDialog(QDialog):
         c.server_folders, names = self.chosen_server_folders()
         if names:
             c.server_folder_names = names
+        c.lyrics_online, c.lyrics_save_sidecar = self.ly_online.isChecked(), self.ly_save.isChecked()
         c.listenbrainz_token = self.lb_token.text().strip()
         c.listenbrainz_url = self.lb_url.text().strip() or "https://api.listenbrainz.org"
         c.resume_mode, c.vis_enabled = self.resume.currentData(), self.vis_on.isChecked()

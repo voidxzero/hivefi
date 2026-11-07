@@ -107,3 +107,18 @@ def test_cover_cache_is_dropped(tmp_path, monkeypatch):
     tagedit.write_cover(str(f), png.read_bytes())
     art.invalidate(t)
     assert art.get_art(t)[:4] == b"\x89PNG"
+
+
+def test_playlist_formats(tmp_path):
+    import xml.etree.ElementTree as ET
+    ts = [dict(source="local", path="/m/a b&c.mp3", title="T & <x>", artist="A", album="B", duration=61.5),
+          dict(source="remote", title="r", artist="x")]
+    assert libexport.export_any(ts, tmp_path / "p.pls") == 1
+    assert (tmp_path / "p.pls").read_text().splitlines() == ["[playlist]", "File1=/m/a b&c.mp3", "Title1=A - T & <x>",
+                                                              "Length1=61", "NumberOfEntries=1", "Version=2"]
+    assert libexport.export_any(ts, tmp_path / "p.xspf") == 1
+    root = ET.parse(tmp_path / "p.xspf").getroot()
+    ns = {"x": "http://xspf.org/ns/0/"}
+    tr = root.find("x:trackList/x:track", ns)
+    assert tr.find("x:location", ns).text == "file:///m/a%20b%26c.mp3" and tr.find("x:title", ns).text == "T & <x>"
+    assert tr.find("x:duration", ns).text == "61500"

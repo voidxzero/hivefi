@@ -19,6 +19,16 @@ from hivefi.ui import seekbar, visualizer
 from tests.test_gui import win, wait  # noqa: F401  (fixture)
 
 app = QApplication.instance() or QApplication([])
+
+
+def ready(w, timeout_ms=15000):
+    """Wait until a freshly started window has loaded the library and restored its session (loaded machines are slow)."""
+    waited = 0
+    while w.status_lbl.text().startswith("Loading") and waited < timeout_ms:
+        wait(100); waited += 100
+    wait(400)
+
+
 need_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg needed")
 
 
@@ -234,7 +244,7 @@ def test_session_roundtrip(win, tmp_path):
     cfg2.server_url = w.cfg.server_url; cfg2.username, cfg2.password = "u", "pw"; cfg2.show_tray = False
     cfg2.sync_on_start = False
     w.player.stop(); w.player.mp.shutdown()
-    w2 = MainWindow(cfg2, Database(tmp_path / "l.db")); w2.show(); wait(1500)
+    w2 = MainWindow(cfg2, Database(tmp_path / "l.db")); w2.show(); ready(w2)
     try:
         assert w2.source == ("local", None)
         assert [t["id"] for t in w2.player.queue] == saved["queue"] and w2.player.index == 1
@@ -258,7 +268,7 @@ def test_layout_and_sizes_persist(win, tmp_path):
     cfg2 = Config.load(w.cfg._path)
     assert cfg2.state and cfg2.browser_state
     w.player.stop(); w.player.mp.shutdown()
-    w2 = MainWindow(cfg2, Database(tmp_path / "l.db")); w2.show(); wait(1200)
+    w2 = MainWindow(cfg2, Database(tmp_path / "l.db")); w2.show(); ready(w2)
     try:
         assert abs(w2.dock_browser.height() - want) < 25, (w2.dock_browser.height(), want)
         c = w2.browser_split.sizes(); assert c[0] < c[1] < c[2]
@@ -375,7 +385,7 @@ def test_track_list_is_a_panel_like_any_other(win, tmp_path):
     from hivefi.ui.main_window import MainWindow
     cfg2 = Config.load(w.cfg._path)
     w.player.stop(); w.player.mp.shutdown()
-    w2 = MainWindow(cfg2, Database(tmp_path / "l.db")); w2.show(); wait(1500)
+    w2 = MainWindow(cfg2, Database(tmp_path / "l.db")); w2.show(); ready(w2)
     try:
         assert w2.dockWidgetArea(w2.dock_tracks) == Qt.DockWidgetArea.LeftDockWidgetArea and w2.dock_tracks.isVisible()
         assert w2.model.rowCount() > 0 and not w2.edit_mode

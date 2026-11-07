@@ -34,8 +34,71 @@ def parse_lrc(text: str) -> list[tuple[int, str]]:
     return out
 
 
-def find_lyrics(track: dict, api=None) -> str:
-    """Raw lyrics: LRC text when time-synced lyrics exist, otherwise plain text."""
+LRCLIB = "https://lrclib.net"
+
+
+def fetch_online(track: dict, base=LRCLIB, timeout=10):
+    """Lyrics from LRCLIB (free, no account): time-synced (LRC) when it has them, otherwise plain; '' if the song is
+    unknown to it; None when the service could not be reached (so the caller tries again later)."""
+    import requests
+    artist, title = track.get("artist") or "", track.get("title") or ""
+    if not artist or not title:
+        return ""
+    params = {"artist_name": artist, "track_name": title}
+    if track.get("album"):
+        params["album_name"] = track["album"]
+    if track.get("duration"):
+        params["duration"] = int(round(track["duration"]))
+    headers = {"User-Agent": "Hivefi (music player)"}
+    try:
+        r = requests.get(f"{base.rstrip('/')}/api/get", params=params, headers=headers, timeout=timeout)
+        if r.status_code == 404:                      # exact match failed (different album/length): search by name
+            r = requests.get(f"{base.rstrip('/')}/api/search", params={"track_name": title, "artist_name": artist},
+                             headers=headers, timeout=timeout)
+            hits = r.json() if r.status_code == 200 else []
+            data = next((h for h in hits if h.get("syncedLyrics") or h.get("plainLyrics")), {})
+        else:
+            data = r.json() if r.status_code == 200 else {}
+    except (requests.RequestException, ValueError):
+        return None
+    return data.get("syncedLyrics") or data.get("plainLyrics") or ""
+
+
+def online_lyrics(track: dict, base=LRCLIB, save_sidecar=False) -> str:
+    """fetch_online() with a cache (also for 'nothing found', so a track is only looked up once) and, if asked,
+    a .lrc/.txt file written beside the audio file."""
+    import hashlib
+
+    from .config import cache_dir
+    key = hashlib.sha1(f"{track.get('artist')}|{track.get('title')}|{track.get('album')}".encode()).hexdigest()
+    f = cache_dir() / f"lyrics-{key}"
+    if f.exists():
+        text = f.read_text(errors="replace")
+    else:
+        text = fetch_online(track, base)
+        if text is None:                              # offline / service down: don't remember it as "no lyrics"
+            return ""
+        f.write_text(text)
+    if text and save_sidecar and track.get("source") == "local" and track.get("path"):
+        side = Path(track["path"]).with_suffix(".lrc" if is_synced(text) else ".txt")
+        if not side.exists() and not side.with_suffix(".lrc").exists():
+            try:
+                side.write_text(text, encoding="utf-8")
+            except OSError:
+                pass
+    return text
+
+
+def find_lyrics(track: dict, api=None, online=False, base=LRCLIB, save_sidecar=False) -> str:
+    """Raw lyrics: LRC text when time-synced lyrics exist, otherwise plain text. With online=True a track that has
+    none locally or on the server is looked up on LRCLIB."""
+    text = _find_local_or_server(track, api)
+    if not text and online:
+        return online_lyrics(track, base, save_sidecar)
+    return text
+
+
+def _find_local_or_server(track: dict, api=None) -> str:
     if track.get("source") == "local" and track.get("path"):
         p = Path(track["path"])
         for ext in (".lrc", ".txt"):

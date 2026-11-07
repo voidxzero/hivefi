@@ -98,3 +98,19 @@ def test_batch_tags_export_and_cover(win, monkeypatch, tmp_path):
     assert all(art._embedded(t["path"])[:4] == b"\x89PNG" for t in db.all_tracks("local"))
     w._set_cover(db.all_tracks("local"), remove=True); wait(1500)
     assert all(art._embedded(t["path"]) is None for t in db.all_tracks("local"))
+
+
+def test_find_covers_online_menu(win, monkeypatch):
+    from hivefi import coverart
+    w, db = win, win.db
+    calls = []
+    monkeypatch.setattr(coverart, "find_covers", lambda tr, only_missing, prog: (calls.append((len(tr), only_missing)),
+                                                                                  prog("x"), (1, ["A – B"], []))[2])
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
+    w._find_covers_online(); wait(200)
+    assert calls == []                                                                  # declined: nothing is sent anywhere
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    w._find_covers_online(); wait(800)
+    assert calls == [(2, True)] and "1 album(s) updated, 1 not found" in w.statusBar().currentMessage()
+    w._find_covers_online(db.all_tracks("local")[:1], only_missing=False); wait(800)
+    assert calls[-1] == (1, False)

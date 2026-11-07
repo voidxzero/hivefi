@@ -4,6 +4,8 @@ import time
 from PyQt6.QtCore import QAbstractTableModel, QMimeData, QModelIndex, Qt
 from PyQt6.QtGui import QBrush, QColor
 
+from ..searchquery import Query
+
 MIME = "application/x-hivefi-tracks"
 
 COLUMNS = [  # (header, key, width)
@@ -89,22 +91,26 @@ class TrackModel(QAbstractTableModel):
 
     def base(self):
         """`all` narrowed by the search text. Typing more characters narrows the previous result instead of
-        rescanning the whole library."""
+        rescanning the whole library (for plain words; `field:value` filters scan everything)."""
         if self._base is None:
-            words = self.text.split()
-            if not words:
+            q = Query(self.text)
+            if not q:
                 self._base = self.all
-            else:
+            elif q.is_plain:
                 src = self.all
                 prev = self._base_words
-                if self._base_prev is not None and prev and all(any(o in n for n in words) for o in prev):
+                if self._base_prev is not None and prev and all(any(o in n for n in q.words) for o in prev):
                     src = self._base_prev                      # new matches are a subset of the old ones
                 self._prime(src)
                 rows = src
-                for w in words:
+                for w in q.words:
                     rows = [t for t in rows if w in t["_hay"]]
                 self._base = rows
-                self._base_prev, self._base_words = rows, words
+                self._base_prev, self._base_words = rows, q.words
+            else:
+                self._prime(self.all)
+                self._base = [t for t in self.all if q.match(t, t["_hay"])]
+                self._base_prev = self._base_words = None
         return self._base
 
     def set_filters(self, text=None, genre="keep", artist="keep", album="keep", ids="keep"):

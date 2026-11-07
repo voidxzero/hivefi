@@ -38,6 +38,11 @@ CREATE TABLE IF NOT EXISTS pending_ops(
   id INTEGER PRIMARY KEY, op TEXT NOT NULL, payload TEXT NOT NULL, created REAL
 );
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS plays(
+  id INTEGER PRIMARY KEY, track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE, played_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_plays_at ON plays(played_at);
+CREATE INDEX IF NOT EXISTS ix_plays_track ON plays(track_id);
 CREATE TABLE IF NOT EXISTS radio_stations(
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL UNIQUE, genre TEXT DEFAULT '', homepage TEXT DEFAULT '',
   remote_id TEXT
@@ -203,6 +208,7 @@ class Database:
     def bump_play(self, tid):
         now = time.time()
         self.conn.execute("UPDATE tracks SET play_count=play_count+1, last_played=? WHERE id=?", (now, tid))
+        self.conn.execute("INSERT INTO plays(track_id, played_at) VALUES(?, ?)", (tid, now))
         self.conn.commit()
         t = self.track(tid)
         if t:
@@ -254,6 +260,21 @@ class Database:
     def add_to_playlist(self, pid, track_ids):
         cur = [t["id"] for t in self.playlist_tracks(pid)]
         self.set_playlist_tracks(pid, cur + list(track_ids))
+
+    # ---- play log ------------------------------------------------------
+    def plays_since(self, since=0.0):
+        """[(track_id, played_at)] newest first."""
+        return [(r[0], r[1]) for r in self.conn.execute(
+            "SELECT track_id, played_at FROM plays WHERE played_at>=? ORDER BY played_at DESC", (since,))]
+
+    def play_history(self, limit=1000):
+        """The tracks that were played most recently, newest first (a track appears once per play)."""
+        self.all_tracks(None)
+        with self._cache_lock:
+            full = self._cache.get(None) or []
+            by_id = {t["id"]: t for t in full}
+        rows = self.conn.execute("SELECT track_id FROM plays ORDER BY played_at DESC, id DESC LIMIT ?", (limit,))
+        return [by_id[r[0]] for r in rows if r[0] in by_id]
 
     # ---- internet radio -----------------------------------------------
     def radio_stations(self):

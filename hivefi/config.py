@@ -107,6 +107,8 @@ class Config:
     listenbrainz_token: str = ""          # scrobble plays to ListenBrainz when set
     listenbrainz_url: str = "https://api.listenbrainz.org"
     shortcuts: dict = field(default_factory=dict)        # menu command -> shortcut ('' = none); only the changed ones
+    lyrics_online: bool = False          # look tracks without lyrics up on LRCLIB (sends artist/title/album)
+    lyrics_save_sidecar: bool = False    # keep what was found as a .lrc/.txt file beside the song
     check_updates: bool = True           # look for a newer version on GitHub at startup
     github_token: str = ""               # optional; needed to update from a private repo (else `gh auth token`)
 

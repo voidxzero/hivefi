@@ -41,6 +41,13 @@ Work on the selected local tracks (or the whole local library when nothing is se
 - **Cover art:** right-click local tracks → Cover Art → Set Cover from Image… / Remove Embedded Cover (ID3, FLAC, Ogg/Opus, MP4).
 - **Export** (Tools → Export Library / Selection…): the selection or the current view as CSV (opens in Excel with accents intact), JSON or an M3U8 playlist.
 
+## Search, lyrics, covers, history
+- **Search syntax** (the search box): plain words and `"phrases"`, plus `artist:` `album:` `title:` `genre:` `albumartist:` `format:` `source:` `folder:` filters, number filters `year:1990-1999` `year:>=2000` `rating:>=4` `plays:0` `bitrate:>=256`, and `-word` / `-genre:rock` to exclude. Everything combines: `artist:pink -live year:<1990`.
+- **Online lyrics** (LRCLIB, free, no account): Preferences → General turns on automatic lookup for tracks that have none (it sends artist, title, album and length); you can also right-click the Lyrics panel → Search for these lyrics online. Synced lyrics scroll like the others, results are cached, and they can be saved as a `.lrc` / `.txt` next to the song.
+- **Cover art search** (Tools → Find Cover Art Online…, or right-click → Cover Art → Find Online…): MusicBrainz + the Cover Art Archive, one request per second, covers are embedded in every track of the album; albums that already have a cover are skipped unless you ask for a replacement.
+- **Play History** (under Library): what was played, newest first; **Library Statistics** (Tools): totals, formats, decades, most played tracks and artists, listening time for the last 7 and 30 days.
+- **Playlist export** as M3U8, PLS or XSPF (right-click a playlist → Export Playlist…).
+
 ## Folder view
 Under **This Computer** and **Navidrome** in the sources panel, a **Folders** node shows the directory structure: the file system below your music folders, and the server's own folders (the paths Navidrome reports; with several server libraries each library is a root). Folders are built when you open them, with track counts; selecting one shows every track in it and below it in path order, and right-click offers Play Folder / Queue Folder. The opened folder is remembered across restarts. (After updating, one Navidrome sync fills in the server paths.)
 
