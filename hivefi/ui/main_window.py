@@ -19,11 +19,12 @@ from ..db import Database
 from ..mpris import Mpris
 from ..player import Player
 from ..subsonic import Subsonic, SubsonicError
-from .. import lyrics, skins, smart, tagedit, updater
+from .. import convert, lyrics, organizer, rgscan, skins, smart, tagedit, updater
 from .album_grid import AlbumGrid
 from .dialogs import TagDialog
 from .audio_dialog import AudioDialog
 from .duplicates_dialog import DuplicatesDialog
+from .tools_dialogs import ConvertDialog, MissingDialog, OrganizeDialog, ReplayGainDialog
 from .equalizer import EqualizerPanel
 from .mini import MiniPlayer
 from .models import COLUMNS, DEFAULT_HIDDEN, MIME, TrackModel, TrackProxy, fmt_time
@@ -278,7 +279,7 @@ class MainWindow(QMainWindow):
         f.addAction("&Rescan Library", QKeySequence("F5"), self.scan_library)
         f.addAction("New &Auto Playlist…", self._new_smart)
         f.addAction("&Import Playlist (M3U)…", self._import_m3u)
-        f.addAction("Find &Duplicates…", self._find_duplicates)
+        f.addAction("&Save Queue as Playlist…", self._save_queue_playlist)
         f.addSeparator()
         f.addAction("&Sync with Navidrome", QKeySequence("Ctrl+Shift+S"), self.sync_now)
         f.addAction("&Preferences…", QKeySequence("Ctrl+,"), self.open_settings)
@@ -320,6 +321,13 @@ class MainWindow(QMainWindow):
         v.addAction("Mini Player", QKeySequence("Ctrl+M"), self._enter_mini)
         v.addAction("Full Screen", QKeySequence("F11"),
                     lambda: self.showNormal() if self.isFullScreen() else self.showFullScreen())
+        tl = mb.addMenu("&Tools")
+        tl.addAction("&Organise Files…", self._organize)
+        tl.addAction("&Convert…", self._convert)
+        tl.addAction("Scan &ReplayGain…", self._scan_rg)
+        tl.addSeparator()
+        tl.addAction("Find &Duplicates…", self._find_duplicates)
+        tl.addAction("Find &Missing Files…", self._find_missing)
         h = mb.addMenu("&Help")
         h.addAction("Check for &Updates…", lambda: self.check_updates(manual=True))
 
@@ -562,6 +570,10 @@ class MainWindow(QMainWindow):
             m.addAction("Edit Tags…", lambda: self._edit_tags(local))
             m.addAction("Show in File Manager",
                         lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(local[0]["path"]).parent))))
+            tm = m.addMenu("Tools")
+            tm.addAction("Organise Files…", lambda: self._organize(local))
+            tm.addAction("Convert…", lambda: self._convert(local))
+            tm.addAction("Scan ReplayGain…", lambda: self._scan_rg(local))
         m.exec(self.table.viewport().mapToGlobal(pos))
 
     def _tree_menu(self, pos):
@@ -586,6 +598,10 @@ class MainWindow(QMainWindow):
                 a.toggled.connect(lambda on, f=folder: self.set_library_enabled(f, on))
             if not self.cfg.library_dirs:
                 m.addAction("No folders added (File → Add Folder)").setEnabled(False)
+        elif d and d[0] == "smart" and isinstance(d[1], str):
+            m.addAction("Make Editable Copy…", lambda: self._copy_smart(d[1]))
+        elif d and d == ("queue", None):
+            m.addAction("Save as Playlist…", self._save_queue_playlist)
         elif d and d[0] == "smart" and isinstance(d[1], int):
             m.addAction("Edit…", lambda: self._edit_smart(d[1]))
             m.addAction("Delete", lambda: self._delete_smart(d[1]))
@@ -705,6 +721,99 @@ class MainWindow(QMainWindow):
             self.db.delete_tracks(ids)
             self.refresh_playlists(); self.load_source()
             self.statusBar().showMessage(f"Removed {len(ids)} duplicate track(s) from the library", 5000)
+
+    # ------------------------------------------------ tools
+    def _tool_tracks(self, tracks=None):
+        """Selected local tracks (or the given ones); with no selection, the whole enabled local library."""
+        if not isinstance(tracks, list):                         # menu actions pass `checked`
+            tracks = [t for t in self._selected() if t["source"] == "local"]
+        return tracks or self._tracks("local")
+
+    def _default_root(self):
+        return next((f for f in self.cfg.library_dirs if self.cfg.lib_enabled(f)), str(Path.home() / "Music"))
+
+    def _job(self, fn, title):
+        w = Worker(fn, self)
+        w.progress.connect(lambda msg: self.statusBar().showMessage(msg))
+        w.failed.connect(lambda msg: QMessageBox.warning(self, title, msg))
+        return w
+
+    def _report(self, title, done, errors, verb):
+        self.statusBar().showMessage(f"{verb} {done} file(s)" + (f", {len(errors)} problem(s)" if errors else ""), 8000)
+        if errors:
+            QMessageBox.warning(self, title, "\n".join(errors[:15]) + ("\n…" if len(errors) > 15 else ""))
+
+    def _organize(self, tracks=None):
+        tr = self._tool_tracks(tracks)
+        dlg = OrganizeDialog(tr, self._default_root(), self)
+        if not dlg.exec():
+            return
+        moves, mode = dlg.result_options()
+        if not moves:
+            self.statusBar().showMessage("Nothing to organise", 4000); return
+        if mode == "move" and QMessageBox.question(self, "Organise Files", f"Move {len(moves)} file(s) on disk?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        roots = [Path(f) for f in self.cfg.library_dirs]
+        w = self._job(lambda prog: organizer.execute(self.db, moves, mode, prog,
+                                                     prune_to=next((str(r) for r in roots if r in Path(moves[0][0]["path"]).parents), None)),
+                      "Organise Files")
+        w.done.connect(lambda r: (self._report("Organise Files", r[0], r[1], "Organised"), self._reload_tracks()))
+        self._run(w)
+
+    def _convert(self, tracks=None):
+        if not convert.available():
+            QMessageBox.warning(self, "Convert", "ffmpeg is not installed."); return
+        tr = self._tool_tracks(tracks)
+        dlg = ConvertDialog(len(tr), str(Path.home() / "Music" / "Converted"), self)
+        if not dlg.exec():
+            return
+        label, dest, pattern = dlg.result_options()
+        w = self._job(lambda prog: convert.convert_tracks(tr, dest, label, pattern, prog), "Convert")
+        w.done.connect(lambda r: self._report("Convert", r[0], r[1], "Converted"))
+        self._run(w)
+
+    def _scan_rg(self, tracks=None):
+        if not rgscan.available():
+            QMessageBox.warning(self, "ReplayGain", "ffmpeg is not installed."); return
+        tr = self._tool_tracks(tracks)
+        dlg = ReplayGainDialog(len(tr), self)
+        if not dlg.exec():
+            return
+        w = self._job(lambda prog: rgscan.scan_tracks(self.db, tr, prog, by_album=dlg.album.isChecked()),
+                      "ReplayGain")
+        w.done.connect(lambda r: (self._report("ReplayGain", r[0], r[1], "Tagged"), self._reload_tracks()))
+        self._run(w)
+
+    def _find_missing(self):
+        import os
+        missing = [t for t in self._tracks("local") if t.get("path") and not os.path.exists(t["path"])]
+        if not missing:
+            QMessageBox.information(self, "Missing Files", "All local files in the library exist."); return
+        dlg = MissingDialog(missing, self)
+        if dlg.exec() and dlg.checked_ids():
+            self.db.delete_tracks(dlg.checked_ids())
+            self.refresh_playlists(); self.load_source()
+
+    def _reload_tracks(self):
+        for q in self.player.queue:                              # files may have moved: refresh queued paths
+            fresh = self.db.track(q["id"]) if q.get("id") else None
+            if fresh:
+                q.update(path=fresh["path"], key=fresh["key"], rg_gain=fresh["rg_gain"])
+        self.refresh_playlists(); self.load_source()
+
+    def _save_queue_playlist(self):
+        q = list(self.player.queue)
+        if not q:
+            self.statusBar().showMessage("The queue is empty", 4000); return
+        self._new_playlist(q)
+
+    def _copy_smart(self, preset):
+        import copy
+        dlg = SmartDialog(self, preset + " (copy)", copy.deepcopy(smart.PRESETS[preset]))
+        if dlg.exec():
+            sid = self.db.save_smart(dlg.name.text().strip(), dlg.result_spec())
+            self.source = ("smart", sid); self.refresh_playlists(); self.load_source()
 
     def _after_library_change(self):
         """Drop queued tracks that belong to switched-off libraries, then refresh every view."""

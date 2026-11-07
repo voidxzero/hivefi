@@ -19,6 +19,14 @@ On startup the app checks `github.com/voidxzero/hivefi` (branch `main`); if ther
 - **Find Duplicates** (File menu): groups same artist + title (ignoring "(Remastered)", "feat." etc.) with a similar length, keeps the best copy (lossless > bitrate > local) unchecked, and removes the others from the library only; files are never deleted.
 - **Ratings in file tags** (optional, Settings → General): ID3 POPM, FMPS_RATING for FLAC/Ogg/Opus/MP4; read back by the scanner.
 
+## Tools menu
+Work on the selected local tracks (or the whole local library when nothing is selected); also in the track right-click menu.
+- **Organise Files:** move or copy files into a folder structure from a tag pattern (default `%albumartist%/%album%/%disc%%track% - %title%`), with a live preview. Moves update the library in place (ratings, playlists and play counts are kept), carry `.lrc`/`.txt`/`.cue` sidecars along, avoid name clashes and remove emptied folders.
+- **Convert:** transcode with ffmpeg to FLAC, MP3 (V0 / 320 / 192), AAC, Opus, Vorbis or WAV into a separate folder; tags and cover art are carried over, originals are never touched.
+- **Scan ReplayGain:** EBU R128 loudness measurement (reference -18 LUFS) that writes ReplayGain 2.0 track and album tags (ID3, Vorbis/FLAC/Opus, MP4) and updates the library.
+- **Find Duplicates / Find Missing Files:** library clean-up (files are never deleted).
+- **Save Queue as Playlist** (File menu and the Now Playing source), and **Make Editable Copy** of any built-in auto playlist (right-click it).
+
 ## Features
 - Classic library layout: source tree, Genre → Artist → Album column browser, sortable track table, now-playing art panel
 - Local library scan (mp3/flac/ogg/opus/m4a/wav/…) via mutagen; incremental rescans; embedded/folder cover art
@@ -98,4 +106,4 @@ are not dropped from your library.
 Config: `~/.config/hivefi/config.json` (mode 0600, holds the server password), library DB: `~/.local/share/hivefi/`.
 
 ## Not done yet
-DSD, room-correction convolution, and editable copies of the preset auto playlists are not done yet.
+DSD, room-correction convolution, CD ripping, internet radio/podcasts, a spectrum visualiser and MusicBrainz auto-tagging are not done yet.
