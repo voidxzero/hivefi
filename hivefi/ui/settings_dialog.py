@@ -1,9 +1,114 @@
 from PyQt6.QtCore import QThread, Qt, pyqtSignal
-from PyQt6.QtWidgets import (QListWidgetItem, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
+from PyQt6.QtWidgets import (QListWidgetItem, QTableWidget, QTableWidgetItem, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
                              QLabel, QLineEdit, QListWidget, QPushButton, QSpinBox, QTabWidget,
                              QVBoxLayout, QWidget, QComboBox)
 
 from ..subsonic import Subsonic, SubsonicError
+
+
+class PanelsTab(QWidget):
+    """Which panels there are, whether they are shown, and where they live (like MusicBee's panel layout editor)."""
+    LOCATIONS = ["Left", "Right", "Top", "Bottom", "Floating"]
+
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Panel", "Show", "Location", "Stacked as a tab with"])
+        self.table.verticalHeader().hide(); self.table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.table.horizontalHeader().setStretchLastSection(True); self.table.setColumnWidth(0, 160)
+        self.table.setColumnWidth(1, 50); self.table.setColumnWidth(2, 110)
+        self.edit = QCheckBox("Allow moving and resizing panels on screen (Edit Mode)")
+        self.edit.setChecked(win.edit_mode)
+        self.layouts = QComboBox()
+        self.btn_apply = QPushButton("Apply now"); self.btn_apply.setToolTip("Apply the changes without closing Preferences")
+        self.btn_apply.clicked.connect(self.apply_to_window)
+        load, save, delete = QPushButton("Load"), QPushButton("Save current as…"), QPushButton("Delete")
+        reset = QPushButton("Reset to default")
+        load.clicked.connect(self._load_layout); save.clicked.connect(self._save_layout)
+        delete.clicked.connect(self._delete_layout); reset.clicked.connect(lambda: self._run_layout("Default"))
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Choose which panels are shown and where they sit. Toolbars (controls, seek bar, volume, "
+                             "search, view mode) can go to any edge; panels can also float or be stacked as tabs."))
+        lay.addWidget(self.table, 1)
+        row = QHBoxLayout(); row.addWidget(self.btn_apply); row.addStretch(); row.addWidget(reset); lay.addLayout(row)
+        lay.addWidget(self.edit)
+        lay.addWidget(QLabel("Layouts:"))
+        row2 = QHBoxLayout()
+        for w in (self.layouts, load, save, delete):
+            row2.addWidget(w)
+        row2.setStretch(0, 1); lay.addLayout(row2)
+        self.refresh()
+
+    # ---- table <-> window
+    def refresh(self):
+        self.specs = self.win.panel_specs()
+        self._initial = {s["key"]: (s["visible"], s["location"], s["tab_with"]) for s in self.specs}
+        titles = {s["key"]: s["title"] for s in self.specs if s["kind"] == "dock"}
+        self.table.setRowCount(len(self.specs))
+        for r, s in enumerate(self.specs):
+            name = QTableWidgetItem(s["title"] + ("   (toolbar)" if s["kind"] == "toolbar" else ""))
+            name.setFlags(Qt.ItemFlag.ItemIsEnabled); self.table.setItem(r, 0, name)
+            show = QCheckBox(); show.setChecked(s["visible"])
+            cell = QWidget(); cl = QHBoxLayout(cell); cl.setContentsMargins(12, 0, 0, 0); cl.addWidget(show)
+            self.table.setCellWidget(r, 1, cell)
+            loc = QComboBox()
+            locs = self.LOCATIONS if s["kind"] == "dock" else ["Top", "Bottom", "Left", "Right"]
+            loc.addItems(locs); loc.setCurrentText(s["location"] if s["location"] in locs else locs[0])
+            self.table.setCellWidget(r, 2, loc)
+            tab = QComboBox(); tab.addItem("—", "")
+            if s["kind"] == "dock":
+                for key, title in titles.items():
+                    if key != s["key"]:
+                        tab.addItem(title, key)
+                tab.setCurrentIndex(max(0, tab.findData(s["tab_with"])))
+            else:
+                tab.setEnabled(False)
+            self.table.setCellWidget(r, 3, tab)
+            loc.currentTextChanged.connect(lambda text, t=tab: t.setEnabled(text != "Floating"))
+            tab.setEnabled(s["kind"] == "dock" and loc.currentText() != "Floating")
+        self.layouts.clear()
+        from .panels_mixin import BUILTIN_LAYOUTS
+        for n in BUILTIN_LAYOUTS:
+            self.layouts.addItem(n, ("builtin", n))
+        for n in sorted(self.win.cfg.layouts):
+            self.layouts.addItem(n, ("saved", n))
+
+    def rows(self):
+        out = []
+        for r, s in enumerate(self.specs):
+            out.append({"key": s["key"], "visible": self.table.cellWidget(r, 1).findChild(QCheckBox).isChecked(),
+                        "location": self.table.cellWidget(r, 2).currentText(),
+                        "tab_with": self.table.cellWidget(r, 3).currentData() or ""})
+        return out
+
+    def apply_to_window(self):
+        changed = [r for r in self.rows()
+                   if (r["visible"], r["location"], r["tab_with"]) != self._initial[r["key"]]]
+        if changed:                                              # panels that were not touched keep their sizes
+            self.win.apply_panel_specs(changed)
+        if self.edit.isChecked() != self.win.edit_mode:
+            self.win._set_edit_mode(self.edit.isChecked())
+        self.refresh()
+
+    # ---- layouts
+    def _run_layout(self, name):
+        self.win._apply_builtin_layout(name); self.refresh()
+
+    def _load_layout(self):
+        kind, name = self.layouts.currentData() or (None, None)
+        if kind == "builtin":
+            self._run_layout(name)
+        elif kind == "saved":
+            self.win._apply_layout_snapshot(self.win.cfg.layouts[name]); self.refresh()
+
+    def _save_layout(self):
+        self.win._save_layout(); self.refresh()
+
+    def _delete_layout(self):
+        kind, name = self.layouts.currentData() or (None, None)
+        if kind == "saved":
+            self.win.cfg.layouts.pop(name, None); self.win.cfg.save(); self.refresh()
 
 
 _RUNNING: set = set()
@@ -99,6 +204,10 @@ class SettingsDialog(QDialog):
         gl.addStretch()
         tabs.addTab(gen, "General")
 
+        self.panels_tab = PanelsTab(parent) if hasattr(parent, "panel_specs") else None
+        if self.panels_tab:
+            tabs.addTab(self.panels_tab, "Panels")
+
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
         lay = QVBoxLayout(self); lay.addWidget(tabs); lay.addWidget(bb)
@@ -168,6 +277,8 @@ class SettingsDialog(QDialog):
         return ([] if len(ticked) in (0, len(items)) else ticked), names
 
     def apply(self):
+        if self.panels_tab:
+            self.panels_tab.apply_to_window()
         c = self.cfg
         c.library_dirs = self.folders()
         c.libraries_off = self.disabled_folders() + ([] if self.enabled.isChecked() else [c.NAVIDROME])

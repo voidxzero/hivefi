@@ -493,3 +493,67 @@ def test_edit_bar_revert_and_dock_menu(win, monkeypatch):
     w._set_edit_mode(True)
     next(b for b in w.edit_bar.findChildren(__import__("PyQt6.QtWidgets", fromlist=["QPushButton"]).QPushButton) if b.text() == "Done").click()
     assert not w.edit_mode
+
+
+def test_panel_editor_in_preferences(win):
+    from PyQt6.QtWidgets import QCheckBox, QComboBox
+    from hivefi.ui.settings_dialog import SettingsDialog
+    w = win
+    w.show(); w.resize(1200, 700); wait(1500)
+    dlg = SettingsDialog(w.cfg, w)
+    tab = dlg.panels_tab
+    assert tab is not None and tab.table.rowCount() == 9 + len(w.toolbars)
+    titles = [tab.table.item(r, 0).text() for r in range(tab.table.rowCount())]
+    assert "Track List" in titles and "Equalizer" in titles and any(t.endswith("(toolbar)") for t in titles)
+    row = {t.split("   ")[0]: r for r, t in enumerate(titles)}
+    def cell(name, col):
+        return tab.table.cellWidget(row[name], col)
+    # defaults mirror the window
+    assert cell("Sources", 1).findChild(QCheckBox).isChecked() and cell("Sources", 2).currentText() == "Left"
+    assert cell("Track List", 2).currentText() == "Top" and not cell("Equalizer", 1).findChild(QCheckBox).isChecked()
+    # change a few things: hide Sources, move Lyrics to the left and show it, stack Track Info with Lyrics,
+    # float the visualizer, move the seek bar to the bottom
+    cell("Sources", 1).findChild(QCheckBox).setChecked(False)
+    cell("Lyrics", 2).setCurrentText("Left"); cell("Lyrics", 1).findChild(QCheckBox).setChecked(True)
+    cell("Track Info", 2).setCurrentText("Left"); cell("Track Info", 1).findChild(QCheckBox).setChecked(True)
+    cell("Track Info", 3).setCurrentIndex(cell("Track Info", 3).findText("Lyrics"))
+    cell("Visualizer", 2).setCurrentText("Floating"); cell("Visualizer", 1).findChild(QCheckBox).setChecked(True)
+    assert not cell("Visualizer", 3).isEnabled()                       # floating panels cannot be tabs
+    cell("Seek Bar", 2).setCurrentText("Bottom")
+    tab.apply_to_window(); wait(300)
+    assert not w.dock_sources.isVisible()
+    assert w.dockWidgetArea(w.dock_lyrics) == Qt.DockWidgetArea.LeftDockWidgetArea
+    assert w.dock_info in w.tabifiedDockWidgets(w.dock_lyrics)
+    assert w.dock_vis.isFloating() and w.dock_vis.isVisible()
+    assert w.toolBarArea(next(t for t in w.toolbars if t.objectName() == "tb_seek")) == Qt.ToolBarArea.BottomToolBarArea
+    # the table re-reads the window afterwards, and untouched panels were not re-docked
+    assert cell_by(tab, "Lyrics", 2).currentText() == "Left" and cell_by(tab, "Visualizer", 2).currentText() == "Floating"
+    tracks_area = w.dockWidgetArea(w.dock_tracks)
+    tab.apply_to_window(); wait(100)
+    assert w.dockWidgetArea(w.dock_tracks) == tracks_area
+    # edit mode checkbox
+    tab.edit.setChecked(True); tab.apply_to_window()
+    assert w.edit_mode
+    tab.edit.setChecked(False); tab.apply_to_window()
+    assert not w.edit_mode
+    # layouts: save the current arrangement, wreck it, load it back; built-in layouts too
+    from PyQt6.QtWidgets import QInputDialog
+    import pytest as _pt
+    mp = _pt.MonkeyPatch()
+    mp.setattr(QInputDialog, "getText", lambda *a, **k: ("Mine", True))
+    tab._save_layout(); mp.undo()
+    assert "Mine" in w.cfg.layouts and tab.layouts.findText("Mine") >= 0
+    tab._run_layout("Default"); wait(300)
+    assert w.dock_sources.isVisible() and w.dockWidgetArea(w.dock_lyrics) != Qt.DockWidgetArea.LeftDockWidgetArea
+    tab.layouts.setCurrentIndex(tab.layouts.findText("Mine")); tab._load_layout(); wait(300)
+    assert not w.dock_sources.isVisible() and w.dockWidgetArea(w.dock_lyrics) == Qt.DockWidgetArea.LeftDockWidgetArea
+    tab.layouts.setCurrentIndex(tab.layouts.findText("Mine")); tab._delete_layout()
+    assert "Mine" not in w.cfg.layouts
+    # no panels tab without a main window
+    assert SettingsDialog(w.cfg).panels_tab is None
+
+
+def cell_by(tab, name, col):
+    for r in range(tab.table.rowCount()):
+        if tab.table.item(r, 0).text().split("   ")[0] == name:
+            return tab.table.cellWidget(r, col)

@@ -276,6 +276,57 @@ class PanelsMixin:
             return True
         return super().eventFilter(obj, ev)
 
+    # ------------------------------------------------------------------ panel editor (Preferences → Panels)
+    AREAS = {"Left": Qt.DockWidgetArea.LeftDockWidgetArea, "Right": Qt.DockWidgetArea.RightDockWidgetArea,
+             "Top": Qt.DockWidgetArea.TopDockWidgetArea, "Bottom": Qt.DockWidgetArea.BottomDockWidgetArea}
+    TB_AREAS = {"Top": Qt.ToolBarArea.TopToolBarArea, "Bottom": Qt.ToolBarArea.BottomToolBarArea,
+                "Left": Qt.ToolBarArea.LeftToolBarArea, "Right": Qt.ToolBarArea.RightToolBarArea}
+
+    def panel_specs(self) -> list[dict]:
+        """Every panel and toolbar with where it is now: {key, title, kind, visible, location, tab_with}."""
+        out = []
+        names = {v: k for k, v in self.AREAS.items()}
+        for d in (self.dock_sources, self.dock_browser, self.dock_tracks, self.dock_np, self.dock_next, self.dock_lyrics,
+                  self.dock_info, self.dock_eq, self.dock_vis):
+            tabbed = [o for o in self.tabifiedDockWidgets(d)]
+            out.append({"key": d.objectName(), "title": d.windowTitle(), "kind": "dock", "obj": d,
+                        "visible": d.toggleViewAction().isChecked(),
+                        "location": "Floating" if d.isFloating() else names.get(self.dockWidgetArea(d), "Right"),
+                        "tab_with": tabbed[0].objectName() if tabbed and not d.isFloating() else ""})
+        tnames = {v: k for k, v in self.TB_AREAS.items()}
+        for tb in self.toolbars:
+            out.append({"key": tb.objectName(), "title": tb.windowTitle(), "kind": "toolbar", "obj": tb,
+                        "visible": tb.toggleViewAction().isChecked(),
+                        "location": tnames.get(self.toolBarArea(tb), "Top"), "tab_with": ""})
+        return out
+
+    def apply_panel_specs(self, rows: list[dict]):
+        """Apply {key, visible, location, tab_with} rows (only the ones given)."""
+        by_key = {s["key"]: s["obj"] for s in self.panel_specs()}
+        docks = []
+        for r in rows:
+            obj = by_key.get(r["key"])
+            if obj is None:
+                continue
+            if isinstance(obj, QToolBar):
+                if r["location"] in self.TB_AREAS:
+                    self.addToolBar(self.TB_AREAS[r["location"]], obj)
+                obj.setVisible(bool(r["visible"]))
+                continue
+            if r["location"] == "Floating":
+                obj.setFloating(True)
+            else:
+                obj.setFloating(False)
+                self.addDockWidget(self.AREAS.get(r["location"], Qt.DockWidgetArea.RightDockWidgetArea), obj)
+            obj.setVisible(bool(r["visible"]))
+            docks.append((obj, r.get("tab_with") or ""))
+        for obj, other in docks:                                   # stacking needs both docks to be in place first
+            o = by_key.get(other)
+            if o is not None and o is not obj and not obj.isFloating() and not o.isFloating() \
+                    and self.dockWidgetArea(o) == self.dockWidgetArea(obj):
+                self.tabifyDockWidget(o, obj)
+        self._apply_edit_state()
+
     # ------------------------------------------------------------------ layouts
     def _layout_snapshot(self):
         return {"state": _b64(self.saveState(STATE_VERSION)), "browser": self._splits_json(self.browser_split)}
