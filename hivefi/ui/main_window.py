@@ -122,7 +122,8 @@ class MainWindow(PanelsMixin, QMainWindow):
         if cfg.header_state:
             self.table.horizontalHeader().restoreState(QByteArray.fromBase64(cfg.header_state.encode()))
             self._sorted_once = True
-        self._set_locked(cfg.layout_locked, save=False)
+        self.installEventFilter(self)
+        self._set_edit_mode(False)                               # always starts locked; View → Edit Mode unlocks
         QTimer.singleShot(0, self._restore_splits)               # needs the window laid out at its final size
         self._start_autosave()
         self._set_view_mode(cfg.view_mode, initial=True)
@@ -242,6 +243,10 @@ class MainWindow(PanelsMixin, QMainWindow):
         self.next_panel.removeRequested.connect(self.player.remove)
         self.status_lbl = QLabel(""); self.statusBar().addWidget(self.status_lbl, 1)
         self.sync_lbl = QLabel(""); self.statusBar().addPermanentWidget(self.sync_lbl)
+        self.btn_edit = QPushButton("✎ Edit layout"); self.btn_edit.setCheckable(True); self.btn_edit.setFlat(True)
+        self.btn_edit.setToolTip("Unlock the layout to move, resize, float or close panels (Ctrl+Shift+E)")
+        self.btn_edit.toggled.connect(self._set_edit_mode)
+        self.statusBar().addPermanentWidget(self.btn_edit)
 
         for key in (Qt.Key.Key_MediaTogglePlayPause, Qt.Key.Key_MediaPlay):
             QShortcut(QKeySequence(key), self, self.player.toggle)
@@ -295,8 +300,8 @@ class MainWindow(PanelsMixin, QMainWindow):
         for tb in self.toolbars:
             pm.addAction(tb.toggleViewAction())
         pm.addSeparator()
-        self.act_lock = pm.addAction("Lock Layout"); self.act_lock.setCheckable(True)
-        self.act_lock.setChecked(self.cfg.layout_locked); self.act_lock.toggled.connect(self._set_locked)
+        self.act_edit = pm.addAction("Edit Mode", QKeySequence("Ctrl+Shift+E")); self.act_edit.setCheckable(True)
+        self.act_edit.setChecked(self.edit_mode); self.act_edit.toggled.connect(self._set_edit_mode)
         pm.addAction("Reset Layout", self._reset_layout)
         self.layout_menu = v.addMenu("Layouts"); self.layout_menu.aboutToShow.connect(self._build_layout_menu)
         sm = v.addMenu("Seek Bar Style"); sg = QActionGroup(self)

@@ -170,12 +170,16 @@ def test_panels_layout_and_lock(win):
     w.addToolBar(Qt.ToolBarArea.BottomToolBarArea, next(t for t in w.toolbars if t.objectName() == "tb_seek"))
     w.addToolBar(Qt.ToolBarArea.LeftToolBarArea, next(t for t in w.toolbars if t.objectName() == "tb_controls"))
     assert w.toolBarArea(next(t for t in w.toolbars if t.objectName() == "tb_seek")) == Qt.ToolBarArea.BottomToolBarArea
-    # lock
-    w._set_locked(True)
-    assert all(not tb.isMovable() for tb in w.toolbars) and w.dock_sources.titleBarWidget() is not None
-    assert w.cfg.layout_locked
-    w._set_locked(False)
+    # edit mode off (the default): nothing can be moved
+    assert not w.edit_mode
+    w._set_edit_mode(True)
     assert all(tb.isMovable() for tb in w.toolbars) and w.dock_sources.titleBarWidget() is None
+    w._set_edit_mode(False)
+    assert all(not tb.isMovable() for tb in w.toolbars) and w.dock_sources.titleBarWidget() is not None
+    from PyQt6.QtWidgets import QDockWidget
+    assert all(d.features() == QDockWidget.DockWidgetFeature.NoDockWidgetFeatures for d in w.findChildren(QDockWidget))
+    assert not w.main_split.handle(1).isEnabled() and not w.browser_split.handle(1).isEnabled()
+    w._set_edit_mode(True)
     # named layouts
     snap = w._layout_snapshot()
     w.cfg.layouts["mine"] = snap
@@ -260,3 +264,48 @@ def test_layout_and_sizes_persist(win, tmp_path):
         assert w2.seek.style_name() == "waveform"
     finally:
         w2.player.stop(); w2.player.mp.shutdown()
+
+
+def _drag(w, x0, y, dx):
+    from PyQt6.QtTest import QTest
+    QTest.mousePress(w, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(x0, y))
+    for step in range(1, 9):
+        QTest.mouseMove(w, QPoint(x0 + dx * step // 8, y)); wait(5)
+    QTest.mouseRelease(w, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(x0 + dx, y))
+    wait(50)
+
+
+def test_edit_mode_locks_resizing(win):
+    w = win
+    w.show(); w.resize(1200, 700); w.dock_sources.show(); wait(300)
+    assert not w.edit_mode and not w.act_edit.isChecked() and not w.btn_edit.isChecked()
+    # locked: dragging the separator next to the Sources panel does nothing
+    r = w.dock_sources.geometry()
+    x, y = r.right() + 2, r.center().y()
+    before = w.dock_sources.width()
+    _drag(w, x, y, 90)
+    assert w.dock_sources.width() == before
+    # the splitters are dead too
+    h = w.main_split.handle(1); sizes = w.main_split.sizes()
+    from PyQt6.QtTest import QTest
+    QTest.mousePress(h, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(2, 1))
+    QTest.mouseMove(h, QPoint(2, 60)); QTest.mouseRelease(h, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(2, 60))
+    wait(50)
+    assert w.main_split.sizes() == sizes
+    # edit mode on (menu action, status-bar button and shortcut share one state): the same drag resizes the panel
+    w.act_edit.setChecked(True)
+    assert w.edit_mode and w.btn_edit.isChecked() and "Editing" in w.btn_edit.text()
+    r = w.dock_sources.geometry(); x, y = r.right() + 2, r.center().y()
+    before = w.dock_sources.width()
+    _drag(w, x, y, 90)
+    assert w.dock_sources.width() > before + 40
+    # and off again locks it again
+    w.btn_edit.setChecked(False)
+    assert not w.edit_mode and not w.act_edit.isChecked()
+    r = w.dock_sources.geometry(); x, y = r.right() + 2, r.center().y()
+    before = w.dock_sources.width()
+    _drag(w, x, y, -60)
+    assert w.dock_sources.width() == before
+    # layouts keep the lock: applying one while locked leaves it locked
+    w._apply_builtin_layout("Everything")
+    assert w.dock_sources.titleBarWidget() is not None

@@ -99,7 +99,6 @@ class Config:
     vis_active: bool = False             # runtime only: a visualizer panel is visible
     vis_bars: int = 48
     vis_peaks: bool = True
-    layout_locked: bool = False          # panels/toolbars cannot be moved
     layouts: dict = field(default_factory=dict)       # name -> saved window layout (base64)
     split_state: str = ""                # main splitter (browser | table)
     browser_state: str = ""              # Genre | Artist | Album splitter

@@ -2,10 +2,10 @@
 visualizer + waveform seek bar, lock layout, named layouts, and the session that is restored on start."""
 import json
 
-from PyQt6.QtCore import QByteArray, QSize, Qt, QTimer
+from PyQt6.QtCore import QByteArray, QEvent, QSize, Qt, QTimer
 from PyQt6.QtGui import QActionGroup, QKeySequence
 from PyQt6.QtWidgets import (QDockWidget, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QSlider, QStyle,
-                             QToolBar, QWidget)
+                             QTabBar, QToolBar, QWidget)
 
 from .. import session, waveform
 from .seekbar import STYLES as SEEK_STYLES, SeekBar
@@ -27,7 +27,7 @@ class PanelsMixin:
     def _make_toolbar(self, title, name):
         tb = QToolBar(title, self)
         tb.setObjectName(name); tb.setIconSize(QSize(24, 24))
-        tb.setMovable(not self.cfg.layout_locked)
+        tb.setMovable(self.edit_mode)
         tb.setAllowedAreas(Qt.ToolBarArea.AllToolBarAreas)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, tb)
         self.toolbars.append(tb)
@@ -139,17 +139,43 @@ class PanelsMixin:
                          "The visualizer needs the GStreamer audio engine (spectrum/level plugins).")
         self.vis.update()
 
-    # ------------------------------------------------------------------ lock layout
-    def _set_locked(self, on, save=True):
-        self.cfg.layout_locked = bool(on)
+    # ------------------------------------------------------------------ edit mode
+    edit_mode = False                  # never persisted: the app always starts with the layout locked
+
+    def _set_edit_mode(self, on):
+        """On: panels can be dragged, floated, tabbed, resized and closed. Off: nothing about the layout can change
+        (title bars are hidden, separators and splitters are dead, toolbars are fixed)."""
+        self.edit_mode = on = bool(on)
         F = QDockWidget.DockWidgetFeature
         for d in self.findChildren(QDockWidget):
-            d.setFeatures(F.NoDockWidgetFeatures if on else F.DockWidgetMovable | F.DockWidgetFloatable | F.DockWidgetClosable)
-            d.setTitleBarWidget(QWidget() if on else None)       # an empty widget hides the title bar
+            d.setFeatures(F.DockWidgetMovable | F.DockWidgetFloatable | F.DockWidgetClosable if on
+                          else F.NoDockWidgetFeatures)
+            d.setTitleBarWidget(None if on else QWidget())      # an empty widget hides the title bar
         for tb in self.toolbars:
-            tb.setMovable(not on)
-        if hasattr(self, "act_lock") and self.act_lock.isChecked() != bool(on):
-            self.act_lock.blockSignals(True); self.act_lock.setChecked(bool(on)); self.act_lock.blockSignals(False)
+            tb.setMovable(on)
+        for sp in (self.main_split, self.browser_split):
+            for i in range(1, sp.count()):
+                sp.handle(i).setEnabled(on)
+        for bar in self.findChildren(QTabBar):                  # tabs of stacked docks
+            bar.setMovable(on)
+        if hasattr(self, "act_edit") and self.act_edit.isChecked() != on:
+            self.act_edit.blockSignals(True); self.act_edit.setChecked(on); self.act_edit.blockSignals(False)
+        if hasattr(self, "btn_edit"):
+            self.btn_edit.blockSignals(True); self.btn_edit.setChecked(on); self.btn_edit.blockSignals(False)
+            self.btn_edit.setText("✎ Editing layout — click to lock" if on else "✎ Edit layout")
+        self.statusBar().showMessage("Edit mode: drag panels and toolbars, resize them, close or float them. "
+                                     "Turn it off to lock the layout." if on else "Layout locked", 5000)
+
+    def _apply_edit_state(self):
+        self._set_edit_mode(self.edit_mode)
+
+    def eventFilter(self, obj, ev):
+        """Dock separators are handled by the main window itself: while the layout is locked they must not react."""
+        if obj is self and not self.edit_mode and ev.type() in (
+                QEvent.Type.MouseButtonPress, QEvent.Type.MouseMove, QEvent.Type.MouseButtonRelease,
+                QEvent.Type.MouseButtonDblClick):
+            return True
+        return super().eventFilter(obj, ev)
 
     # ------------------------------------------------------------------ layouts
     def _layout_snapshot(self):
@@ -158,7 +184,7 @@ class PanelsMixin:
 
     def _apply_layout_snapshot(self, snap):
         self.restoreState(_unb64(snap["state"]))
-        self._set_locked(self.cfg.layout_locked, save=False)          # restoreState resets dock features
+        self._apply_edit_state()                                      # restoreState resets dock features
         for sp, key in ((self.main_split, "split"), (self.browser_split, "browser")):
             self._apply_splits(sp, snap.get(key, ""))
 
@@ -198,7 +224,7 @@ class PanelsMixin:
             d.setVisible(d in show)
         for tb in self.toolbars:
             tb.setVisible(True)
-        self._set_locked(self.cfg.layout_locked, save=False)
+        self._apply_edit_state()
 
     # ------------------------------------------------------------------ splitters
     @staticmethod
