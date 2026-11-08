@@ -25,8 +25,6 @@ class FullscreenVisualizer(QWidget):
         self.effects = [cls() for cls in vizfx.effect_classes()]
         self.index = 0
         self.auto = cfg.vis_full_effect == "auto"
-        if not self.auto:
-            self.select(cfg.vis_full_effect, remember=False)
         self.cycle = int(cfg.vis_full_cycle)
         self._since_switch = 0.0
         self.track_text = ""
@@ -39,6 +37,10 @@ class FullscreenVisualizer(QWidget):
         self.broken: set[str] = set()
         self.timer = QTimer(self, interval=33, timeout=self._tick)
         self.frames = 0
+        # last: switching effects touches the state above (the feedback buffer...). Selecting the saved effect before it
+        # existed raised AttributeError, which took the whole program down whenever a fixed effect had been chosen.
+        if not self.auto:
+            self.select(cfg.vis_full_effect, remember=False)
 
     # ---- control
     @property

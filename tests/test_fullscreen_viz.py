@@ -304,3 +304,18 @@ def test_feedback_effects_really_feed_back(tmp_path):
     for _ in range(80):
         a.update(0.033); fb.warp(**e.motion(a.t, a))
     assert fb.buf[..., :3].max() < 25                    # and faded away
+
+
+@pytest.mark.parametrize("name", [c.name for c in vizfx.effect_classes()])
+def test_opens_with_a_saved_fixed_effect(name):
+    """Choosing an effect remembers it; opening the visualizer again with it saved used to raise AttributeError in the
+    constructor (the effect was selected before the feedback buffer existed) and take the program down."""
+    from hivefi.ui.viz_fullscreen import FullscreenVisualizer
+    cfg = Config(); cfg.vis_full_effect = name
+    fs = FullscreenVisualizer(cfg); failed = []
+    fs.effectFailed.connect(lambda n, m: failed.append((n, m)))
+    fs.resize(400, 300); fs.show()
+    for _ in range(10):
+        loud(fs.audio); fs.repaint()
+    assert fs.effect.name == name and not fs.auto and not failed
+    fs.close()
