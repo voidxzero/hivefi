@@ -54,6 +54,9 @@ Work on the selected local tracks (or the whole local library when nothing is se
 - **Folder monitoring and Inbox** (Preferences → Library): *Rescan automatically when files are added* uses the system's file notifications; the **Inbox** folder takes new music dropped into it, waits until copying has finished, reads the tags and moves each file (and its lyrics file) into the chosen library folder using a naming pattern like `%albumartist%/%album%/%disc%%track% - %title%`. Tools → Process Inbox Now does it on demand.
 - **More tags:** composer, comment and BPM are read from MP3, FLAC, Ogg, Opus and M4A files, shown as optional columns and in Track Info, searchable (`composer:`, `comment:`, `bpm:>=120`), usable in Auto Playlists, editable in the tag editor and the batch tools. **Skip counts:** leaving a track in its first quarter counts as a skip (column "Skips", search `skips:`, the preset *Often Skipped*). The first start after updating re-reads local tags once; your column layout is kept and the new optional columns start hidden.
 
+## Notifications
+Preferences → General → *Show a notification when the song changes* (off by default; optionally only while Hivefi is not in front). It uses `notify-send` when installed (with the cover, and each song replaces the previous bubble), otherwise the tray icon's balloon; internet radio announces each new "Artist - Title".
+
 ## Sorting
 Artists, album artists and albums sort without a leading "The" ("The Beatles" is filed under B) in the track list, the Artist / Album columns of the browser and the Albums grid. Preferences → General has the list of words to ignore (default `the`; add `a, an, die, le` or clear it to turn it off). Only the sort order changes, never the names shown.
 

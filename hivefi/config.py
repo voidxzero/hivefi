@@ -120,6 +120,8 @@ class Config:
     inbox_pattern: str = "%albumartist%/%album%/%disc%%track% - %title%"
     podcast_dir: str = ""                # where downloaded episodes go (empty = the app's data folder)
     ignore_articles: list = field(default_factory=lambda: ["the"])   # leading words ignored when sorting artists/albums
+    notify_track: bool = False           # a desktop notification when the song changes
+    notify_only_inactive: bool = True    # ... but not while the Hivefi window is in front
     check_updates: bool = True           # look for a newer version on GitHub at startup
     github_token: str = ""               # optional; needed to update from a private repo (else `gh auth token`)
 

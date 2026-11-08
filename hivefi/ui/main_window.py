@@ -19,7 +19,7 @@ from ..db import Database
 from ..mpris import Mpris
 from ..player import Player
 from ..subsonic import Subsonic, SubsonicError
-from .. import art, convert, coverart, devicesync, inbox as inbox_mod, podcasts, sortkey, folders, stats as libstats, libexport, listenbrainz, lyrics, radio, tagtools, organizer, rgscan, skins, smart, tagedit, updater
+from .. import art, convert, coverart, devicesync, inbox as inbox_mod, notify, podcasts, sortkey, folders, stats as libstats, libexport, listenbrainz, lyrics, radio, tagtools, organizer, rgscan, skins, smart, tagedit, updater
 from .album_grid import AlbumGrid
 from .dialogs import TagDialog
 from .audio_dialog import AudioDialog
@@ -593,6 +593,7 @@ class MainWindow(PanelsMixin, QMainWindow):
             self.np_panel.sub.setText(f'{title}\n{cur["title"]}')
             self.setWindowTitle(f'{title} — {cur["title"]}')
             self.statusBar().showMessage(f"♪ {title}", 8000)
+            self._notify_track(cur, title=title)
 
     # ------------------------------------------------ folder tree (Navidrome's and this computer's directories)
     def _folder_index(self, src):
@@ -869,7 +870,30 @@ class MainWindow(PanelsMixin, QMainWindow):
             w = Worker(lambda _p: listenbrainz.flush(self.db, tok, base), self)
             self._lb_worker = w; self._run(w)
 
+    def _notify_track(self, t, title=None):
+        """"Now playing" bubble (off by default; optionally only while the window is not in front)."""
+        c = self.cfg
+        if not c.notify_track or (c.notify_only_inactive and self.isActiveWindow()):
+            return
+        api, tc = self.api, dict(t)
+        summary = title or tc["title"]
+        body = tc["title"] if title else f'{tc["artist"]}\n{tc["album"]}' if tc.get("album") else tc["artist"]
+        def job(_p):
+            icon = ""
+            try:
+                data = art.get_art(tc, api, 200)
+                if data:
+                    from ..config import cache_dir
+                    f = cache_dir() / "notify-cover"
+                    f.write_bytes(data); icon = str(f)
+            except Exception:  # noqa: BLE001 - a notification without a cover is fine
+                pass
+            if not notify.send(summary, body, icon) and self.tray:
+                self.tray.showMessage(summary, body)
+        self._run(Worker(job, self))
+
     def _on_now_playing(self, t):
+        self._notify_track(t)
         if self.cfg.listenbrainz_token and t["source"] in ("local", "remote"):
             tok, base, tc = self.cfg.listenbrainz_token, self.cfg.listenbrainz_url, dict(t)
             def send(_p):

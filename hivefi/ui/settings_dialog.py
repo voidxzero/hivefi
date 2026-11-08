@@ -282,6 +282,11 @@ class SettingsDialog(QDialog):
         lbrow = QHBoxLayout(); lbrow.addWidget(self.lb_token, 1); lbrow.addWidget(lb_test)
         gl.addWidget(QLabel("Scrobble plays to ListenBrainz (listenbrainz.org → Settings → User token):"))
         gl.addLayout(lbrow); gl.addWidget(self.lb_url); gl.addWidget(self.lb_status)
+        self.notify_on = QCheckBox("Show a notification when the song changes")
+        self.notify_on.setChecked(cfg.notify_track)
+        self.notify_idle = QCheckBox("... but only while Hivefi is not the window in front")
+        self.notify_idle.setChecked(cfg.notify_only_inactive)
+        gl.addWidget(self.notify_on); gl.addWidget(self.notify_idle)
         self.articles = QLineEdit(", ".join(cfg.ignore_articles))
         self.articles.setToolTip("Artists and albums sort without these leading words: 'The Beatles' is filed under B")
         gl.addWidget(QLabel("Ignore these leading words when sorting artists and albums (comma separated):"))
@@ -399,6 +404,7 @@ class SettingsDialog(QDialog):
         c.server_folders, names = self.chosen_server_folders()
         if names:
             c.server_folder_names = names
+        c.notify_track, c.notify_only_inactive = self.notify_on.isChecked(), self.notify_idle.isChecked()
         c.ignore_articles = [w.strip() for w in self.articles.text().split(",") if w.strip()]
         c.watch_folders, c.inbox_dir = self.watch.isChecked(), self.inbox.text().strip()
         c.inbox_target, c.inbox_pattern = self.inbox_target.currentText().strip(), self.inbox_pattern.text().strip() or c.inbox_pattern
