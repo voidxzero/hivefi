@@ -282,6 +282,18 @@ class SettingsDialog(QDialog):
         lbrow = QHBoxLayout(); lbrow.addWidget(self.lb_token, 1); lbrow.addWidget(lb_test)
         gl.addWidget(QLabel("Scrobble plays to ListenBrainz (listenbrainz.org → Settings → User token):"))
         gl.addLayout(lbrow); gl.addWidget(self.lb_url); gl.addWidget(self.lb_status)
+        self.lf_key = QLineEdit(cfg.lastfm_key); self.lf_key.setPlaceholderText("Last.fm API key")
+        self.lf_secret = QLineEdit(cfg.lastfm_secret); self.lf_secret.setEchoMode(QLineEdit.EchoMode.Password)
+        self.lf_secret.setPlaceholderText("Last.fm shared secret")
+        self.lf_session, self.lf_user, self._lf_token = cfg.lastfm_session, cfg.lastfm_user, ""
+        self.lf_status = QLabel(self._lf_text())
+        self.lf_connect = QPushButton("Connect"); self.lf_connect.clicked.connect(self._lf_step)
+        lf_off = QPushButton("Disconnect"); lf_off.clicked.connect(self._lf_disconnect)
+        self.lf_love = QCheckBox("Starring a song also loves it on Last.fm"); self.lf_love.setChecked(cfg.lastfm_love_stars)
+        lfrow = QHBoxLayout(); lfrow.addWidget(self.lf_connect); lfrow.addWidget(lf_off); lfrow.addStretch()
+        gl.addWidget(QLabel("Last.fm scrobbling (create a free API account at last.fm/api/account/create):"))
+        gl.addWidget(self.lf_key); gl.addWidget(self.lf_secret); gl.addLayout(lfrow); gl.addWidget(self.lf_status)
+        gl.addWidget(self.lf_love)
         self.notify_on = QCheckBox("Show a notification when the song changes")
         self.notify_on.setChecked(cfg.notify_track)
         self.notify_idle = QCheckBox("... but only while Hivefi is not the window in front")
@@ -350,6 +362,42 @@ class SettingsDialog(QDialog):
         self._closed = True
         super().done(r)
 
+    def _lf_text(self):
+        return f"✔ Connected as {self.lf_user or 'a user'}" if self.lf_session else "Not connected"
+
+    def _lf_base(self):
+        return getattr(self.cfg, "lastfm_url", "https://ws.audioscrobbler.com/2.0/")
+
+    def _lf_step(self):
+        """Step 1: open the authorisation page. Step 2 (same button): collect the session once the user allowed it."""
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+        from .. import lastfm
+        key, secret = self.lf_key.text().strip(), self.lf_secret.text().strip()
+        if not key or not secret:
+            self.lf_status.setText("Enter the API key and the shared secret first"); return
+        if not self._lf_token:
+            self.lf_status.setText("Contacting Last.fm…")
+            def ok(token):
+                self._lf_token = token
+                QDesktopServices.openUrl(QUrl(lastfm.auth_url(key, token)))
+                self.lf_connect.setText("I have allowed Hivefi — finish")
+                self.lf_status.setText("Allow Hivefi in the browser window that opened, then press the button again")
+            self._async(lambda: lastfm.get_token(key, secret, self._lf_base()), ok,
+                        lambda e: self.lf_status.setText(f"✘ {e}"))
+            return
+        token = self._lf_token
+        def done(res):
+            self.lf_session, self.lf_user = res
+            self._lf_token = ""; self.lf_connect.setText("Connect"); self.lf_status.setText(self._lf_text())
+        def failed(e):
+            self._lf_token = ""; self.lf_connect.setText("Connect"); self.lf_status.setText(f"✘ {e}")
+        self._async(lambda: lastfm.get_session(token, key, secret, self._lf_base()), done, failed)
+
+    def _lf_disconnect(self):
+        self.lf_session = self.lf_user = self._lf_token = ""
+        self.lf_connect.setText("Connect"); self.lf_status.setText(self._lf_text())
+
     def _test_lb(self):
         from .. import listenbrainz
         tok, url = self.lb_token.text().strip(), self.lb_url.text().strip() or listenbrainz.DEFAULT_URL
@@ -404,6 +452,8 @@ class SettingsDialog(QDialog):
         c.server_folders, names = self.chosen_server_folders()
         if names:
             c.server_folder_names = names
+        c.lastfm_key, c.lastfm_secret = self.lf_key.text().strip(), self.lf_secret.text().strip()
+        c.lastfm_session, c.lastfm_user, c.lastfm_love_stars = self.lf_session, self.lf_user, self.lf_love.isChecked()
         c.notify_track, c.notify_only_inactive = self.notify_on.isChecked(), self.notify_idle.isChecked()
         c.ignore_articles = [w.strip() for w in self.articles.text().split(",") if w.strip()]
         c.watch_folders, c.inbox_dir = self.watch.isChecked(), self.inbox.text().strip()

@@ -19,7 +19,7 @@ from ..db import Database
 from ..mpris import Mpris
 from ..player import Player
 from ..subsonic import Subsonic, SubsonicError
-from .. import art, convert, coverart, devicesync, inbox as inbox_mod, notify, podcasts, sortkey, folders, stats as libstats, libexport, listenbrainz, lyrics, radio, tagtools, organizer, rgscan, skins, smart, tagedit, updater
+from .. import art, convert, coverart, devicesync, inbox as inbox_mod, lastfm, notify, podcasts, sortkey, folders, stats as libstats, libexport, listenbrainz, lyrics, radio, tagtools, organizer, rgscan, skins, smart, tagedit, updater
 from .album_grid import AlbumGrid
 from .dialogs import TagDialog
 from .audio_dialog import AudioDialog
@@ -848,6 +848,8 @@ class MainWindow(PanelsMixin, QMainWindow):
             return
         if self.cfg.listenbrainz_token and listenbrainz.queue_listen(self.db, t):
             self._lb_flush()
+        if self.cfg.lastfm_connected and lastfm.queue_listen(self.db, t):
+            self._lf_flush()
         self.db.bump_play(t["id"])
         fresh = self.db.track(t["id"]) or {}
         t["play_count"] = fresh.get("play_count", 0)
@@ -863,6 +865,31 @@ class MainWindow(PanelsMixin, QMainWindow):
         fresh = self.db.track(t["id"]) or {}
         t["skip_count"] = fresh.get("skip_count", 0)
         self.model.update_track(t["id"], skip_count=t["skip_count"])
+
+    def _lf_flush(self):
+        c = self.cfg
+        if c.lastfm_connected and not (getattr(self, "_lf_worker", None) and self._lf_worker.isRunning()):
+            key, secret, sk, base = c.lastfm_key, c.lastfm_secret, c.lastfm_session, c.lastfm_url
+            w = Worker(lambda _p: lastfm.flush(self.db, key, secret, sk, base), self)
+            self._lf_worker = w; self._run(w)
+
+    def _lastfm_love(self, tracks, on=True):
+        c = self.cfg
+        if not c.lastfm_connected:
+            return
+        key, secret, sk, base, tr = c.lastfm_key, c.lastfm_secret, c.lastfm_session, c.lastfm_url, [dict(t) for t in tracks]
+        def job(_p):
+            bad = 0
+            for t in tr:
+                try:
+                    lastfm.love(t, key, secret, sk, on, base)
+                except lastfm.LastFmError:
+                    bad += 1
+            return bad
+        w = Worker(job, self)
+        w.done.connect(lambda bad: self.statusBar().showMessage(
+            ("Loved" if on else "Un-loved") + f" on Last.fm" + (f" ({bad} failed)" if bad else ""), 5000))
+        self._run(w)
 
     def _lb_flush(self):
         tok, base = self.cfg.listenbrainz_token, self.cfg.listenbrainz_url
@@ -894,6 +921,14 @@ class MainWindow(PanelsMixin, QMainWindow):
 
     def _on_now_playing(self, t):
         self._notify_track(t)
+        if self.cfg.lastfm_connected and t["source"] in ("local", "remote"):
+            c, tc = self.cfg, dict(t)
+            def lf(_p):
+                try:
+                    lastfm.now_playing(tc, c.lastfm_key, c.lastfm_secret, c.lastfm_session, c.lastfm_url)
+                except lastfm.LastFmError:
+                    pass                                         # "now playing" is best effort
+            self._run(Worker(lf, self))
         if self.cfg.listenbrainz_token and t["source"] in ("local", "remote"):
             tok, base, tc = self.cfg.listenbrainz_token, self.cfg.listenbrainz_url, dict(t)
             def send(_p):
@@ -941,6 +976,8 @@ class MainWindow(PanelsMixin, QMainWindow):
         if not tracks:
             return
         self.db.set_starred_many([t["id"] for t in tracks], on)
+        if self.cfg.lastfm_love_stars:
+            self._lastfm_love(tracks, on)
         self._model_refresh(tracks, starred=int(on))
         self.db.queue_ops("star", [{"id": t["remote_id"], "on": on} for t in tracks if t["source"] == "remote"])
         self._kick_flush()
@@ -990,6 +1027,10 @@ class MainWindow(PanelsMixin, QMainWindow):
             m.addAction("Edit Tags…", lambda: self._edit_tags(local))
             m.addAction("Show in File Manager",
                         lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(local[0]["path"]).parent))))
+            if self.cfg.lastfm_connected:
+                lm = m.addMenu("Last.fm")
+                lm.addAction("Love", lambda: self._lastfm_love(sel, True))
+                lm.addAction("Remove Love", lambda: self._lastfm_love(sel, False))
             tm = m.addMenu("Tools")
             tm.addAction("Organise Files…", lambda: self._organize(local))
             tm.addAction("Convert…", lambda: self._convert(local))

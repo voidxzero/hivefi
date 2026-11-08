@@ -54,6 +54,9 @@ Work on the selected local tracks (or the whole local library when nothing is se
 - **Folder monitoring and Inbox** (Preferences → Library): *Rescan automatically when files are added* uses the system's file notifications; the **Inbox** folder takes new music dropped into it, waits until copying has finished, reads the tags and moves each file (and its lyrics file) into the chosen library folder using a naming pattern like `%albumartist%/%album%/%disc%%track% - %title%`. Tools → Process Inbox Now does it on demand.
 - **More tags:** composer, comment and BPM are read from MP3, FLAC, Ogg, Opus and M4A files, shown as optional columns and in Track Info, searchable (`composer:`, `comment:`, `bpm:>=120`), usable in Auto Playlists, editable in the tag editor and the batch tools. **Skip counts:** leaving a track in its first quarter counts as a skip (column "Skips", search `skips:`, the preset *Often Skipped*). The first start after updating re-reads local tags once; your column layout is kept and the new optional columns start hidden.
 
+## Last.fm
+Preferences → General → Last.fm: enter your own API key and shared secret (free at last.fm/api/account/create), press **Connect**, allow Hivefi in the browser, and press the button again to finish. Plays are scrobbled (at 50% or 4 minutes, never for tracks under 30 s, streams or podcasts) from a queue that survives being offline, "now playing" is announced, and right-click → Last.fm → Love / Remove Love; optionally starring a song also loves it. Hivefi cannot ship a shared API key, which is why you need your own. ListenBrainz works alongside it.
+
 ## Notifications
 Preferences → General → *Show a notification when the song changes* (off by default; optionally only while Hivefi is not in front). It uses `notify-send` when installed (with the cover, and each song replaces the previous bubble), otherwise the tray icon's balloon; internet radio announces each new "Artist - Title".
 

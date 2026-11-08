@@ -120,6 +120,12 @@ class Config:
     inbox_pattern: str = "%albumartist%/%album%/%disc%%track% - %title%"
     podcast_dir: str = ""                # where downloaded episodes go (empty = the app's data folder)
     ignore_articles: list = field(default_factory=lambda: ["the"])   # leading words ignored when sorting artists/albums
+    lastfm_key: str = ""                # the user's own Last.fm API key / secret (last.fm/api/account/create)
+    lastfm_secret: str = ""
+    lastfm_session: str = ""            # filled in by Connect (browser authorisation)
+    lastfm_user: str = ""
+    lastfm_url: str = "https://ws.audioscrobbler.com/2.0/"
+    lastfm_love_stars: bool = False      # starring a song also loves it on Last.fm
     notify_track: bool = False           # a desktop notification when the song changes
     notify_only_inactive: bool = True    # ... but not while the Hivefi window is in front
     check_updates: bool = True           # look for a newer version on GitHub at startup
@@ -144,6 +150,10 @@ class Config:
         if not self.libraries_off:
             return list(tracks)
         return [t for t in tracks if self.track_enabled(t)]
+
+    @property
+    def lastfm_connected(self) -> bool:
+        return bool(self.lastfm_key and self.lastfm_secret and self.lastfm_session)
 
     @property
     def server_enabled(self) -> bool:
