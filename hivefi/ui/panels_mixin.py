@@ -51,7 +51,7 @@ class PanelsMixin:
         tb.addWidget(self.btn_shuffle); tb.addWidget(self.btn_repeat)
         # --- volume
         tv = self._make_toolbar("Volume", "tb_volume")
-        vol_icon = QLabel(); vol_icon.setPixmap(self._icon(S.SP_MediaVolume).pixmap(18, 18))
+        vol_icon = self.vol_icon = QLabel(); vol_icon.setPixmap(self._icon(S.SP_MediaVolume).pixmap(18, 18))
         self.vol = QSlider(Qt.Orientation.Horizontal); self.vol.setRange(0, 100); self.vol.setFixedWidth(110)
         self.vol.setValue(self.cfg.volume); self.vol.valueChanged.connect(self._set_volume)
         tv.addWidget(vol_icon); tv.addWidget(self.vol)

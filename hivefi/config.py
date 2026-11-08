@@ -86,7 +86,6 @@ class Config:
     state: str = ""                      # dock layout (QMainWindow.saveState)
     header_state: str = ""               # track table columns (order/width/visibility)
     header_columns: list = field(default_factory=list)   # the columns that state was saved with (new ones start hidden)
-    header_columns: list = field(default_factory=list)   # which columns that state was saved with (new ones start hidden)
     skin: str = "Dark"
     view_mode: str = "browser"           # browser | albums
     show_tray: bool = True

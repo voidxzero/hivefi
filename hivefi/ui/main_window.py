@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget, QFile
                              QSizePolicy, QTreeWidget, QTreeWidgetItem, QWidget)
 
 from .. import art, scanner, sync
+from . import icons
 from ..config import Config, data_dir
 from ..db import Database
 from ..mpris import Mpris
@@ -24,7 +25,7 @@ from .album_grid import AlbumGrid
 from .dialogs import TagDialog
 from .audio_dialog import AudioDialog
 from .duplicates_dialog import DuplicatesDialog
-from . import shortcuts
+from . import icons, shortcuts
 from .stats_dialog import StatsDialog
 from .devicesync_dialog import DeviceSyncDialog
 from .np_dialog import NowPlayingDialog
@@ -132,13 +133,8 @@ class MainWindow(PanelsMixin, QMainWindow):
         if cfg.state:
             self.restoreState(QByteArray.fromBase64(cfg.state.encode()), STATE_VERSION)
         if cfg.header_state:
-            self.table.horizontalHeader().restoreState(QByteArray.fromBase64(cfg.header_state.encode()))
+            self._restore_header(QByteArray.fromBase64(cfg.header_state.encode()))
             self._sorted_once = True
-            # Qt restores an older state with fewer columns happily and shows the new ones: keep the optional ones hidden
-            known = set(cfg.header_columns) or {c[1] for c in COLUMNS[:17]}      # states saved before this was recorded
-            for i, (_, key, _w) in enumerate(COLUMNS):
-                if key not in known and key in DEFAULT_HIDDEN:
-                    self.table.setColumnHidden(i, True)
         self.installEventFilter(self)
         self._set_edit_mode(False)                               # always starts locked; View → Edit Mode unlocks
         QTimer.singleShot(0, self._restore_splits)               # needs the window laid out at its final size
@@ -192,8 +188,36 @@ class MainWindow(PanelsMixin, QMainWindow):
     def _playlist_tracks(self, pid):
         return [t for t in self.db.playlist_tracks(pid) if self.cfg.track_enabled(t)]
 
+    def _restore_header(self, state: QByteArray):
+        """Restore the track table's column order, widths and visibility.
+
+        QHeaderView.restoreState() on a state saved before columns were added appends the new sections without
+        counting them in the header's length; hiding them afterwards then shrinks the length below the real width
+        and the table stops painting cells part-way across (everything after Artist came out empty). So the state
+        is restored into a throwaway header and copied over section by section, which keeps the length right."""
+        tmp = QTableView(); tmp.setModel(self.model)
+        th = tmp.horizontalHeader()
+        if not th.restoreState(state):
+            tmp.deleteLater(); return
+        h, n = self.table.horizontalHeader(), min(th.count(), len(COLUMNS))
+        # Qt shows the columns an older state did not know about: keep the optional ones hidden
+        known = set(self.cfg.header_columns) or {c[1] for c in COLUMNS[:17]}      # states saved before this was recorded
+        for v in range(n):
+            li = th.logicalIndex(v)
+            h.moveSection(h.visualIndex(li), v)
+        hide = {i: th.isSectionHidden(i) or (key not in known and key in DEFAULT_HIDDEN)
+                for i, (_, key, _w) in enumerate(COLUMNS[:n])}
+        shown = [li for li in (h.logicalIndex(v) for v in range(n)) if not hide.get(li, False)]
+        last = shown[-1] if shown else -1                   # the stretch section: let it fill the rest of the row
+        for i, hidden in hide.items():
+            if not hidden and i != last:
+                h.resizeSection(i, th.sectionSize(i))
+            h.setSectionHidden(i, hidden)
+        h.setSortIndicator(th.sortIndicatorSection(), th.sortIndicatorOrder())
+        tmp.deleteLater()
+
     def _icon(self, sp):
-        return self.style().standardIcon(sp)
+        return icons.icon(self, sp)
 
     def _build_ui(self):
         self._build_toolbars()
@@ -1703,6 +1727,7 @@ class MainWindow(PanelsMixin, QMainWindow):
     def _apply_skin_visuals(self):
         if self.edit_mode:
             self._style_edit_mode(True)                          # the dashed frame follows the skin's accent
+        self.vol_icon.setPixmap(self._icon(QStyle.StandardPixmap.SP_MediaVolume).pixmap(18, 18))   # a QLabel: repaint
         self.model.playing_color = self.skin_tokens["accent"]
         self.model.set_playing(self.model.playing_id)
         self.grid.set_placeholder_color(QColor(self.skin_tokens["button"]))

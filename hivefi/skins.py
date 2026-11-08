@@ -5,7 +5,7 @@ from pathlib import Path
 from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import QApplication
 
-from .config import config_dir
+from .config import cache_dir, config_dir
 
 from .skinpack import SPINDLE_SKINS
 
@@ -125,6 +125,59 @@ def _grad(a, b, horizontal=False):
     return f"qlineargradient(x1:0, y1:0, x2:{x2}, y2:{y2}, stop:0 {a}, stop:1 {b})"
 
 
+def _is_dark(color: str) -> bool:
+    return QColor(color).lightness() < 128
+
+
+def complete_tokens(t: dict) -> dict:
+    """A copy of the skin with every rich token filled in. Plain colour skins (Dark, AMOLED, Nord, user skins with
+    only the core colours...) only define window/text/base/button/highlight/accent; the panel, button, border and
+    title colours are derived from those so they get the same fully styled UI as the skin-pack skins."""
+    t = dict(t)
+    dark = _is_dark(t["window"])
+    w, tx, btn = t["window"], t["text"], t["button"]
+    acc = QColor(t["accent"])
+    lum = 0.299 * acc.red() + 0.587 * acc.green() + 0.114 * acc.blue()
+    derived = dict(
+        panel_top=_mix(w, tx, 0.05) if dark else _mix(w, "#ffffff", 0.45),
+        panel_bot=w,
+        border=_mix(w, tx, 0.20 if dark else 0.24),
+        hilite=_mix(btn, "#ffffff", 0.10 if dark else 0.6),
+        dim=_mix(tx, w, 0.42),
+        accent_text="#111111" if lum > 150 else "#ffffff",
+        btn_top=_mix(btn, tx, 0.08) if dark else _mix(btn, "#ffffff", 0.55),
+        btn_bot=btn,
+        title_top=_mix(w, tx, 0.08 if dark else 0.05),
+        title_bot=_mix(w, tx, 0.05 if dark else 0.03),
+        lcd_bg=t["base"], lcd_fg=t["accent"], lcd_dim=_mix(t["base"], tx, 0.18),
+        good="#5cb85c", warn="#e0a030", bad="#d9534f", caption=tx,
+    )
+    for k, v in derived.items():
+        t.setdefault(k, v)
+    t.setdefault("r", 4); t.setdefault("r_panel", 6)
+    return t
+
+
+_GLYPHS = {"check": "M3 7.4l2.6 2.6L11 4.4", "down": "M3.5 5.5L7 9l3.5-3.5", "up": "M3.5 8.5L7 5l3.5 3.5"}
+
+
+def _glyph(name: str, color: str) -> str:
+    """A small stroke glyph (check mark, arrows) in `color` as an SVG file for QSS: sub-controls styled with QSS
+    lose the style's own drawing, so check marks and combo/spin arrows have to be supplied as images."""
+    c = QColor(color).name()
+    try:
+        d = cache_dir() / "skin"
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / f"{name}-{c[1:]}.svg"
+        if not f.exists():
+            f.write_text(f'<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14">'
+                         f'<path d="{_GLYPHS[name]}" fill="none" stroke="{c}" stroke-width="1.8" '
+                         'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+        return f.as_posix()
+    except OSError:
+        return ""
+
+
 def build_qss(t: dict) -> str:
     base = f"""
 QDockWidget::title {{ background: {t['button']}; padding: 4px 8px; }}
@@ -139,12 +192,12 @@ QSlider::handle:vertical {{ background: {t['accent']}; height: 12px; margin: 0 -
 QToolTip {{ background: {t['button']}; color: {t['text']}; border: 1px solid {t['accent']}; }}
 QListWidget#albumgrid::item:selected {{ background: {t['highlight']}; color: {t['hl_text']}; }}
 """
-    if "btn_top" not in t:                                  # a plain colour skin
-        return base
+    t = complete_tokens(t)
     r, rp = int(t.get("r", 3)), int(t.get("r_panel", 4))
     old = t.get("style") == "classic98"
     bd = t["border"]
     face_raised = "outset" if old else "solid"
+    hover_bg = _mix(t["base"], t["text"], 0.07)
     out = base + f"""
 QToolBar {{ background: {_grad(t['panel_top'], t['panel_bot'])}; border: 0; border-bottom: 1px solid {bd};
     spacing: 4px; padding: 2px; }}
@@ -154,6 +207,7 @@ QMenuBar::item:selected {{ background: {t['highlight']}; color: {t['hl_text']}; 
 QMenu {{ background: {t['panel_bot']}; color: {t['text']}; border: 1px solid {bd}; }}
 QMenu::item {{ padding: 4px 22px; }}
 QMenu::item:selected {{ background: {t['highlight']}; color: {t['hl_text']}; }}
+QMenu::item:disabled {{ color: {t['dim']}; }}
 QMenu::separator {{ height: 1px; background: {bd}; margin: 3px 6px; }}
 QPushButton, QToolButton {{ background: {_grad(t['btn_top'], t['btn_bot'])}; color: {t['text']};
     border: {'2px' if old else '1px'} {face_raised} {bd if not old else t['btn_top']}; border-radius: {r}px; padding: 3px 10px;
@@ -161,9 +215,9 @@ QPushButton, QToolButton {{ background: {_grad(t['btn_top'], t['btn_bot'])}; col
 QToolButton {{ padding: 3px 5px; }}
 QPushButton:hover, QToolButton:hover {{ border-color: {t['accent'] if not old else t['btn_top']}; }}
 QPushButton:pressed, QToolButton:pressed {{ background: {t['btn_bot']}; {'border-style: inset;' if old else ''} }}
-QPushButton:checked, QToolButton:checked {{ background: {t['accent']}; color: {t.get('accent_text', t['hl_text'])};
+QPushButton:checked, QToolButton:checked {{ background: {t['accent']}; color: {t['accent_text']};
     border-color: {t['accent']}; }}
-QPushButton:disabled, QToolButton:disabled {{ color: {t.get('dim', t['text'])}; }}
+QPushButton:disabled, QToolButton:disabled {{ color: {t['dim']}; }}
 QLineEdit, QPlainTextEdit, QTextEdit {{ background: {t['base']}; color: {t['text']};
     border: {'2px inset ' + t['btn_top'] if old else '1px solid ' + bd}; border-radius: {r}px; padding: 2px 4px;
     selection-background-color: {t['highlight']}; selection-color: {t['hl_text']}; }}
@@ -175,7 +229,7 @@ QDockWidget::title {{ background: {_grad(t['title_top'], t['title_bot'])}; color
 QHeaderView::section {{ background: {_grad(t['title_top'], t['title_bot'])}; color: {t['text']}; border: 0;
     border-right: 1px solid {bd}; border-bottom: 1px solid {bd}; padding: 3px 6px; }}
 QSplitter::handle {{ background: {t['panel_bot']}; }}
-QStatusBar {{ background: {t['panel_bot']}; color: {t.get('dim', t['text'])}; }}
+QStatusBar {{ background: {t['panel_bot']}; color: {t['dim']}; }}
 QTabBar::tab {{ background: {_grad(t['title_top'], t['title_bot'])}; color: {t['text']}; border: 1px solid {bd};
     padding: 4px 10px; border-top-left-radius: {r}px; border-top-right-radius: {r}px; }}
 QTabBar::tab:selected {{ background: {t['panel_top']}; border-bottom: 2px solid {t['accent']}; }}
@@ -187,10 +241,65 @@ QScrollBar::handle:horizontal {{ background: {_grad(t['btn_top'], t['btn_bot'])}
     border-radius: {r}px; min-width: 26px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
-QSlider::groove:horizontal, QSlider::groove:vertical {{ background: {t.get('lcd_dim', t['button'])}; }}
-QProgressBar {{ background: {t.get('lcd_bg', t['base'])}; border: 1px solid {bd}; border-radius: {r}px;
+QSlider::groove:horizontal, QSlider::groove:vertical {{ background: {t['lcd_dim']}; }}
+QProgressBar {{ background: {t['lcd_bg']}; border: 1px solid {bd}; border-radius: {r}px;
     color: {t['text']}; text-align: center; }}
-QProgressBar::chunk {{ background: {t.get('lcd_fg', t['accent'])}; border-radius: {r}px; }}
+QProgressBar::chunk {{ background: {t['lcd_fg']}; border-radius: {r}px; }}
+"""
+    if not old:                                             # modern touches; Classic 98 keeps its bevels
+        out += f"""
+QToolBar {{ spacing: 6px; padding: 3px 6px; }}
+QToolBar QToolButton {{ background: transparent; border: 1px solid transparent; padding: 4px; }}
+QToolBar QToolButton:hover {{ background: {_grad(t['btn_top'], t['btn_bot'])}; border-color: {bd}; }}
+QToolBar QToolButton:pressed {{ background: {t['btn_bot']}; }}
+QToolBar QToolButton:checked {{ background: {t['accent']}; color: {t['accent_text']}; border-color: {t['accent']};
+    padding: 4px 10px; }}
+QToolBar QToolButton:!checked:checkable {{ padding: 4px 10px; border-color: {bd}; }}
+QToolBar QLineEdit {{ padding: 4px 8px; min-height: 18px; }}
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus {{ border-color: {t['accent']}; }}
+QMenu {{ padding: 4px; border-radius: {rp}px; }}
+QMenu::item {{ padding: 5px 24px 5px 22px; border-radius: {r}px; }}
+QTreeView::item, QListView::item {{ padding: 3px 2px; }}
+QTreeView::item:hover, QListView::item:hover {{ background: {hover_bg}; }}
+QTreeView::item:selected, QListView::item:selected {{ background: {t['highlight']}; color: {t['hl_text']}; }}
+QHeaderView::section {{ padding: 4px 6px; }}
+QDockWidget::title {{ padding: 5px 8px; }}
+QScrollBar:vertical {{ width: 11px; background: transparent; }}
+QScrollBar:horizontal {{ height: 11px; background: transparent; }}
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{ background: {_mix(t['base'], t['text'], 0.22)};
+    border: 2px solid transparent; background-clip: padding; border-radius: 5px; }}
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{ background: {_mix(t['base'], t['text'], 0.38)}; }}
+QToolTip {{ background: {t['panel_top']}; border: 1px solid {bd}; padding: 4px 6px; }}
+QStatusBar QPushButton, QStatusBar QToolButton {{ padding: 2px 8px; }}
+QListWidget#albumgrid::item {{ padding: 0; }}
+QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit, QTimeEdit {{ background: {t['base']}; color: {t['text']};
+    border: 1px solid {bd}; border-radius: {r}px; padding: 3px 6px; min-height: 18px; }}
+QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {{ border-color: {_mix(bd, t['accent'], 0.5)}; }}
+QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{ border-color: {t['accent']}; }}
+QComboBox::drop-down {{ border: 0; width: 20px; }}
+QComboBox::down-arrow {{ image: url("{_glyph('down', t['text'])}"); width: 12px; height: 12px; }}
+QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button,
+QDateEdit::up-button, QDateEdit::down-button, QTimeEdit::up-button, QTimeEdit::down-button {{
+    border: 0; background: transparent; width: 16px; }}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow, QDateEdit::up-arrow, QTimeEdit::up-arrow {{
+    image: url("{_glyph('up', t['text'])}"); width: 10px; height: 10px; }}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow, QDateEdit::down-arrow, QTimeEdit::down-arrow {{
+    image: url("{_glyph('down', t['text'])}"); width: 10px; height: 10px; }}
+QComboBox QAbstractItemView {{ background: {t['panel_bot']}; color: {t['text']}; border: 1px solid {bd};
+    selection-background-color: {t['highlight']}; selection-color: {t['hl_text']}; outline: 0; }}
+QCheckBox::indicator, QRadioButton::indicator, QGroupBox::indicator {{ width: 14px; height: 14px;
+    background: {t['base']}; border: 1px solid {_mix(bd, t['text'], 0.25)}; border-radius: 3px; }}
+QRadioButton::indicator {{ border-radius: 8px; }}
+QCheckBox::indicator:hover, QRadioButton::indicator:hover, QGroupBox::indicator:hover {{ border-color: {t['accent']}; }}
+QCheckBox::indicator:checked, QGroupBox::indicator:checked {{ background: {t['accent']}; border-color: {t['accent']};
+    image: url("{_glyph('check', t['accent_text'])}"); }}
+QCheckBox::indicator:indeterminate {{ background: {_mix(t['base'], t['accent'], 0.5)}; border-color: {t['accent']}; }}
+QRadioButton::indicator:checked {{ border-color: {t['accent']}; background: qradialgradient(cx:0.5, cy:0.5, radius:0.5,
+    fx:0.5, fy:0.5, stop:0 {t['accent']}, stop:0.45 {t['accent']}, stop:0.55 {t['base']}, stop:1 {t['base']}); }}
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{ background: {t['window']}; border-color: {bd}; }}
+QGroupBox {{ border: 1px solid {bd}; border-radius: {rp}px; margin-top: 10px; padding-top: 6px; }}
+QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 0 4px; }}
+QListWidget#albumgrid::item:selected {{ background: {t['highlight']}; color: {t['hl_text']}; }}
 """
     if t.get("font"):
         out += f"\nQWidget {{ font-family: {t['font']}; {'font-size: ' + t['font_size'] + ';' if t.get('font_size') else ''} }}\n"
@@ -200,7 +309,7 @@ QProgressBar::chunk {{ background: {t.get('lcd_fg', t['accent'])}; border-radius
 def apply_skin(app: QApplication, name: str, directory: Path | None = None) -> dict:
     """Apply skin by name (falls back to Dark). Returns the resolved tokens (incl. 'accent')."""
     skins = all_skins(directory)
-    t = skins.get(name) or skins[DEFAULT]
+    t = complete_tokens(skins.get(name) or skins[DEFAULT])
     if app.style().objectName().lower() != "fusion":   # re-setting the style would dangle cached QStyle refs
         app.setStyle("Fusion")
     c = QColor

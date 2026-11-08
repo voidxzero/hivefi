@@ -1,6 +1,7 @@
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSlider, QStyle, QVBoxLayout, QWidget
 
+from .icons import icon
 from .models import fmt_time
 from .panels import ArtLabel
 
@@ -18,7 +19,7 @@ class MiniPlayer(QWidget):
         self.sub = QLabel("")
         S = QStyle.StandardPixmap
         def btn(sp, fn):
-            b = QPushButton(self.style().standardIcon(sp), ""); b.setFlat(True); b.clicked.connect(fn); return b
+            b = QPushButton(icon(self, sp), ""); b.setFlat(True); b.clicked.connect(fn); return b
         self.b_play = btn(S.SP_MediaPlay, player.toggle)
         row = QHBoxLayout()
         row.addWidget(btn(S.SP_MediaSkipBackward, player.previous)); row.addWidget(self.b_play)
@@ -32,7 +33,7 @@ class MiniPlayer(QWidget):
         lay = QHBoxLayout(self); lay.addWidget(self.art); lay.addLayout(col, 1)
         self.resize(420, 110)
         player.stateChanged.connect(lambda pl: self.b_play.setIcon(
-            self.style().standardIcon(S.SP_MediaPause if pl else S.SP_MediaPlay)))
+            icon(self, S.SP_MediaPause if pl else S.SP_MediaPlay)))
         player.positionChanged.connect(self._pos)
         player.durationChanged.connect(lambda d: self.seek.setRange(0, d))
         player.trackChanged.connect(self.set_track)
