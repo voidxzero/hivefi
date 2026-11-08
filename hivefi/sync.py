@@ -20,6 +20,8 @@ def song_to_fields(s):
         rating=int(s.get("userRating") or 0), starred=1 if s.get("starred") else 0,
         play_count=int(s.get("playCount") or 0), rg_gain=(s.get("replayGain") or {}).get("trackGain"), cover_id=s.get("coverArt") or s.get("albumId"),
         album_id=str(s["albumId"]) if s.get("albumId") else None, rpath=s.get("path") or None,
+        sample_rate=int(s.get("samplingRate") or 0), bit_depth=int(s.get("bitDepth") or 0),
+        channels=int(s.get("channelCount") or 0),
         composer=s.get("displayComposer") or "", comment=s.get("comment") or "", bpm=int(s.get("bpm") or 0),
         aa_tag=s.get("albumArtist") or ((s.get("albumArtists") or [{}])[0].get("name") or ""),
     )

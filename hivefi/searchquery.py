@@ -12,7 +12,8 @@ import re
 TEXT_FIELDS = {"title": "title", "artist": "artist", "album": "album", "albumartist": "album_artist",
                "genre": "genre", "format": "suffix", "source": "source", "composer": "composer", "comment": "comment"}
 NUM_FIELDS = {"year": "year", "rating": "rating", "plays": "play_count", "bitrate": "bitrate", "track": "track_no",
-              "disc": "disc_no", "bpm": "bpm", "skips": "skip_count"}
+              "disc": "disc_no", "bpm": "bpm", "skips": "skip_count",
+              "samplerate": "sample_rate", "bits": "bit_depth", "channels": "channels"}
 _TOKEN = re.compile(r'(-?)(?:(\w+):)?(?:"([^"]*)"|(\S+))')
 
 

@@ -95,7 +95,7 @@ def test_radio_in_the_window(win, monkeypatch):
     # a stream title announced by the stream shows up
     w.player.play_list([t], 0); wait(300)
     w.player.streamTitle.emit("The Band - A Song")
-    assert "A Song" in w.np_panel.sub.text() and "A Song" in w.windowTitle()
+    assert "A Song" in w.np_panel.plain_text() and "A Song" in w.windowTitle()
     w.player.stop()
     # edit and delete
     monkeypatch.setattr(mw.StationDialog, "values", lambda self: dict(name="Jazz FM 2", url="http://127.0.0.1:9/jazz",

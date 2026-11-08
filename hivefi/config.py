@@ -128,6 +128,8 @@ class Config:
     lastfm_love_stars: bool = False      # starring a song also loves it on Last.fm
     notify_track: bool = False           # a desktop notification when the song changes
     notify_only_inactive: bool = True    # ... but not while the Hivefi window is in front
+    np_fields: list = field(default_factory=lambda: ["title", "artist", "album"])   # what Now Playing shows, in order
+    np_labels: bool = False              # ... with the name of each field in front
     check_updates: bool = True           # look for a newer version on GitHub at startup
     github_token: str = ""               # optional; needed to update from a private repo (else `gh auth token`)
 

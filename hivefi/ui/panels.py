@@ -36,6 +36,8 @@ def border_color(widget) -> QColor:
 
 class ArtLabel(QLabel):
     """Square-fitting cover art that rescales with its container, with a border around the picture."""
+    clicked = pyqtSignal()
+
     def __init__(self):
         super().__init__()
         self._pm: QPixmap | None = None
@@ -57,6 +59,11 @@ class ArtLabel(QLabel):
         scaled = self._pm.scaled(s, s, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         self.setPixmap(with_border(scaled, border_color(self)))
 
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(e)
+
     def changeEvent(self, e):
         if e.type() == QEvent.Type.PaletteChange and self._pm is not None:
             self._update()                                      # skin changed: redraw the frame in its colour
@@ -64,19 +71,70 @@ class ArtLabel(QLabel):
 
 
 class NowPlayingPanel(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.art = ArtLabel()
-        self.title = QLabel("Nothing playing"); self.title.setWordWrap(True)
-        f = self.title.font(); f.setBold(True); f.setPointSize(f.pointSize() + 1); self.title.setFont(f)
-        self.sub = QLabel(""); self.sub.setWordWrap(True)
-        lay = QVBoxLayout(self); lay.setContentsMargins(6, 6, 6, 6)
-        lay.addWidget(self.art, 1); lay.addWidget(self.title); lay.addWidget(self.sub)
+    navigate = pyqtSignal(str, object)       # what was clicked ("album", "artist", "genre", "year"...), the playing track
+    configureRequested = pyqtSignal()
 
-    def set_track(self, t):
+    def __init__(self, cfg=None):
+        super().__init__()
+        from .. import npfields
+        self.cfg, self._nf = cfg, npfields
+        self._t = None
+        self._ctx: dict = {}
+        self._stream = ""
+        self.art = ArtLabel()
+        self.art.clicked.connect(lambda: self._t and self.navigate.emit("album", self._t))
+        self.info = QLabel(); self.info.setWordWrap(True); self.info.setTextFormat(Qt.TextFormat.RichText)
+        self.info.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self.info.linkActivated.connect(lambda kind: self._t and self.navigate.emit(kind, self._t))
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._menu)
+        lay = QVBoxLayout(self); lay.setContentsMargins(6, 6, 6, 6)
+        lay.addWidget(self.art, 1); lay.addWidget(self.info)
+        self.render()
+
+    def fields(self):
+        return list(self.cfg.np_fields) if self.cfg else list(self._nf.DEFAULT_FIELDS)
+
+    def labels(self):
+        return bool(self.cfg and self.cfg.np_labels)
+
+    def set_track(self, t, ctx=None):
+        self._t, self._stream = t, ""
+        self._ctx = ctx or {}
         if not t:
-            self.title.setText("Nothing playing"); self.sub.setText(""); self.art.set_art(None); return
-        self.title.setText(t["title"]); self.sub.setText(f'{t["artist"]}\n{t["album"]}')
+            self.art.set_art(None)
+        self.art.setCursor(Qt.CursorShape.PointingHandCursor if t else Qt.CursorShape.ArrowCursor)
+        self.art.setToolTip("Show this album in the library" if t else "")
+        self.render()
+
+    def set_context(self, ctx):
+        self._ctx = ctx or {}
+        self.render()
+
+    def set_stream_title(self, title):
+        self._stream = title or ""
+        self.render()
+
+    def render(self):
+        if not self._t:
+            self.info.setText("<div style='font-size:large;font-weight:bold'>Nothing playing</div>"); return
+        link = self.palette().link().color().name()
+        self.info.setText(self._nf.html(self.fields(), self._t, self._ctx, self.labels(), link, lead=self._stream or None))
+
+    def plain_text(self) -> str:
+        from PyQt6.QtGui import QTextDocumentFragment
+        return QTextDocumentFragment.fromHtml(self.info.text()).toPlainText()
+
+    def _menu(self, pos):
+        from PyQt6.QtWidgets import QMenu
+        m = QMenu(self)
+        m.addAction("Configure Now Playing…", self.configureRequested.emit)
+        m.exec(self.mapToGlobal(pos))
+
+    def changeEvent(self, e):
+        if e.type() == QEvent.Type.PaletteChange:
+            self.render()                                      # link colour follows the skin
+        super().changeEvent(e)
 
 
 class UpNextPanel(QWidget):

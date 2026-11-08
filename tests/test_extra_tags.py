@@ -63,7 +63,7 @@ def test_columns_dialog_and_info_panel():
     from hivefi.ui.models import COLUMNS, DEFAULT_HIDDEN, TrackModel
     from hivefi.ui.panels import TrackInfoPanel
     keys = [c[1] for c in COLUMNS]
-    assert keys[-4:] == ["composer", "bpm", "comment", "skip_count"]
+    assert keys[-7:-3] == ["composer", "bpm", "comment", "skip_count"]
     assert {"composer", "bpm", "comment", "skip_count"} <= set(DEFAULT_HIDDEN)
     t = dict(id=1, title="T", artist="A", album_artist="A", album="B", genre="", year=0, track_no=1, disc_no=1,
              duration=60, bitrate=0, suffix="mp3", size=1, rating=0, starred=0, play_count=0, last_played=0, date_added=0,

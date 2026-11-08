@@ -132,6 +132,9 @@ def read_tags(path: str) -> dict | None:
         suffix=p.suffix.lstrip(".").lower(),
         size=os.path.getsize(path),
         rating=rating, rg_gain=rg, **extra,
+        sample_rate=int(getattr(info, "sample_rate", 0) or 0),
+        bit_depth=int(getattr(info, "bits_per_sample", 0) or getattr(info, "bits_per_raw_sample", 0) or 0),
+        channels=int(getattr(info, "channels", 0) or 0),
     )
 
 

@@ -100,6 +100,13 @@ class AlbumGrid(QListWidget):
             return True
         return super().event(e)
 
+    def select_album(self, key):
+        """Select (and scroll to) the album with this key, if it is in the grid."""
+        it = self._items.get(key)
+        if it is not None:
+            self.setCurrentItem(it); it.setSelected(True); self.scrollToItem(it)
+        return it is not None
+
     def selected_album(self):
         it = self.currentItem()
         return self.album_tracks(it) if it and it.isSelected() else None

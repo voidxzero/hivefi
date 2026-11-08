@@ -617,7 +617,7 @@ def test_old_column_layout_is_handled(win):
     from hivefi.ui.main_window import MainWindow
     from hivefi.ui.models import COLUMNS, DEFAULT_HIDDEN
     w = win
-    old_n = len(COLUMNS) - 4                                           # the 17 columns of the earlier version
+    old_n = 17                                                         # the columns of the earlier version
     old = QTableView(); old.setModel(QStandardItemModel(1, old_n))
     for i, (_, k, _w) in enumerate(COLUMNS[:old_n]):
         old.setColumnHidden(i, k in DEFAULT_HIDDEN)

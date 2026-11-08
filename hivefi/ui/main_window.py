@@ -27,6 +27,7 @@ from .duplicates_dialog import DuplicatesDialog
 from . import shortcuts
 from .stats_dialog import StatsDialog
 from .devicesync_dialog import DeviceSyncDialog
+from .np_dialog import NowPlayingDialog
 from .station_dialog import StationDialog
 from .watcher import FolderWatcher
 from .tagtools_dialog import TagToolsDialog
@@ -268,7 +269,8 @@ class MainWindow(PanelsMixin, QMainWindow):
         self.splitDockWidget(self.dock_browser, self.dock_tracks, Qt.Orientation.Vertical)
 
         # dockable panels
-        self.np_panel = NowPlayingPanel(); self.next_panel = UpNextPanel()
+        self.np_panel = NowPlayingPanel(self.cfg); self.next_panel = UpNextPanel()
+        self.np_panel.navigate.connect(self._np_navigate); self.np_panel.configureRequested.connect(self._configure_now_playing)
         self.lyrics_panel = LyricsPanel(); self.info_panel = TrackInfoPanel()
         L, R = Qt.DockWidgetArea.LeftDockWidgetArea, Qt.DockWidgetArea.RightDockWidgetArea
         self.dock_sources = self._dock("Sources", self.tree, "dock_sources", L)
@@ -338,6 +340,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         v = mb.addMenu("&View")
         v.addAction("Focus Search", QKeySequence("Ctrl+F"), self.search.setFocus)
         v.addAction("Lyrics", QKeySequence("Ctrl+L"), self.show_lyrics)
+        v.addAction("Now Playing Options…", self._configure_now_playing)
         v.addSeparator()
         self.lib_menu = v.addMenu("Libraries"); self.lib_menu.aboutToShow.connect(self._build_lib_menu)
         pm = v.addMenu("Panels")
@@ -395,6 +398,7 @@ class MainWindow(PanelsMixin, QMainWindow):
 
     def _connect_player(self):
         P = self.player
+        P.stateChanged.connect(lambda _p: self.np_panel.set_context(self._np_context()))
         P.positionChanged.connect(self.lyrics_panel.set_position)
         self.lyrics_panel.seekRequested.connect(P.seek)
         self.lyrics_panel.searchOnline.connect(lambda: self._refresh_lyrics(force_online=True))
@@ -587,10 +591,69 @@ class MainWindow(PanelsMixin, QMainWindow):
             self.source = ("radio", None)
         self.refresh_playlists(); self.load_source()
 
+    def _np_context(self):
+        """Things the Now Playing panel can show that come from the audio engine (the format after the DSP chain)."""
+        try:
+            return {"out": self.player.mp.output_caps()}
+        except Exception:  # noqa: BLE001 - a missing engine detail must never break the panel
+            return {}
+
+    def _configure_now_playing(self, _checked=False):
+        dlg = NowPlayingDialog(self.cfg.np_fields, self.cfg.np_labels, self.player.current, self._np_context(), self)
+        if dlg.exec():
+            self.cfg.np_fields = dlg.result_fields() or ["title"]
+            self.cfg.np_labels = dlg.labels.isChecked()
+            self.cfg.save(); self.np_panel.render()
+
+    def show_in_library(self, genre=None, artist=None, album=None, search=None, track=None):
+        """Jump to a place in the library: the Genre / Artist / Album selection, or a search, with a track highlighted."""
+        self._search_timer.stop()                                # a search typed a moment ago must not undo this jump
+        if getattr(self, "_grid_timer", None):
+            self._grid_timer.stop()
+        if self.source != ("all", None):
+            self.source = ("all", None)
+            self.tree.blockSignals(True); self.tree.setCurrentItem(self._items[("all", None)]); self.tree.blockSignals(False)
+        self.search.blockSignals(True); self.search.setText(search or ""); self.search.blockSignals(False)
+        self.model.text = (search or "").lower(); self.model._base = None
+        self.load_source()
+        if genre or artist or album:
+            self._restore_browser((genre, artist, album))
+        self._refresh_grid()
+        if self.cfg.view_mode == "albums" and track is not None and album:
+            self.grid.select_album(track.get("_ak"))             # shows exactly that album's tracks
+        self._update_status()
+        if track is not None:
+            row = self.model.row_of(track["id"])
+            if row is not None:
+                self.table.selectRow(row)
+                self.table.scrollTo(self.model.index(row, 2), self.table.ScrollHint.PositionAtCenter)
+        return True
+
+    def _np_navigate(self, kind, t):
+        """A click in the Now Playing panel: take me to that album / artist / genre / year / composer / the song."""
+        if not t or t.get("source") not in ("local", "remote"):
+            return False
+        aa = t.get("_aa") or t.get("album_artist") or t.get("artist")
+        if kind == "album":
+            return self.show_in_library(artist=aa, album=t.get("album"), track=t)
+        if kind == "album_artist" or (kind == "artist" and t.get("artist") == aa):
+            return self.show_in_library(artist=aa, track=t)
+        if kind == "artist":                                     # a track artist that is not the album artist
+            return self.show_in_library(search=f'artist:"{t["artist"]}"', track=t)
+        if kind == "genre" and t.get("genre"):
+            return self.show_in_library(genre=t["genre"], track=t)
+        if kind == "year" and t.get("year"):
+            return self.show_in_library(search=f"year:{t['year']}", track=t)
+        if kind == "composer" and t.get("composer"):
+            return self.show_in_library(search=f'composer:"{t["composer"]}"', track=t)
+        if kind == "track":
+            return self.show_in_library(track=t)
+        return False
+
     def _on_stream_title(self, title):
         cur = self.player.current
         if cur and cur["source"] == "radio":
-            self.np_panel.sub.setText(f'{title}\n{cur["title"]}')
+            self.np_panel.set_stream_title(title)
             self.setWindowTitle(f'{title} — {cur["title"]}')
             self.statusBar().showMessage(f"♪ {title}", 8000)
             self._notify_track(cur, title=title)
@@ -739,16 +802,16 @@ class MainWindow(PanelsMixin, QMainWindow):
             lw.setUpdatesEnabled(True); lw.blockSignals(False)
 
     def _restore_browser(self, saved):
-        """Re-select the Genre/Artist/Album that were chosen before a reload, where they still exist."""
+        """Select Genre / Artist / Album (any of them may be None = [All]) where they exist."""
         order = ["genre", "artist", "album"]
         for i, (lv, val) in enumerate(zip(order, saved)):
-            if not val:
-                break
-            items = self.lists[lv].findItems(val, Qt.MatchFlag.MatchExactly)
-            if not items:
-                break
-            self.lists[lv].blockSignals(True); self.lists[lv].setCurrentItem(items[0]); self.lists[lv].blockSignals(False)
-            self.model.set_filters(**{lv: val})
+            if val:
+                items = self.lists[lv].findItems(val, Qt.MatchFlag.MatchExactly)
+                if items:
+                    self.lists[lv].blockSignals(True); self.lists[lv].setCurrentItem(items[0]); self.lists[lv].blockSignals(False)
+                    self.model.set_filters(**{lv: val})
+                elif lv != "genre":
+                    pass
             if i < 2:
                 self._fill_browser(order[i + 1])
 
@@ -801,7 +864,7 @@ class MainWindow(PanelsMixin, QMainWindow):
     def _on_track(self, t):
         self.model.set_playing(t["id"] if t else None)
         self._refresh_next()
-        self.np_panel.set_track(t)
+        self.np_panel.set_track(t, self._np_context())
         if not t:
             self.setWindowTitle("Hivefi"); self.mini.art.set_art(None); self.seek.set_peaks(None); return
         self._refresh_lyrics()

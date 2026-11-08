@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS smart_playlists(id INTEGER PRIMARY KEY, name TEXT NOT
 
 TRACK_COLS = ("title artist album_artist album genre year track_no disc_no duration "
               "bitrate suffix size rating starred play_count last_played mtime cover_id rg_gain folder_id "
-              "album_id aa_tag rpath composer comment bpm").split()
+              "album_id aa_tag rpath composer comment bpm sample_rate bit_depth channels").split()
 
 
 class Database:
@@ -82,6 +82,11 @@ class Database:
             self.conn.commit()
         if "folder_id" not in cols:   # migration: which Subsonic music folder (library) a server track came from
             self.conn.execute("ALTER TABLE tracks ADD COLUMN folder_id TEXT")
+            self.conn.commit()
+        if "sample_rate" not in cols:  # migration: audio properties (sample rate, bit depth, channels); tags re-read once
+            for col in ("sample_rate", "bit_depth", "channels"):
+                self.conn.execute(f"ALTER TABLE tracks ADD COLUMN {col} INTEGER")
+            self.conn.execute("UPDATE tracks SET mtime=0 WHERE source='local'")
             self.conn.commit()
         if "skip_count" not in cols:  # migration: how often a track was skipped
             self.conn.execute("ALTER TABLE tracks ADD COLUMN skip_count INTEGER DEFAULT 0")
