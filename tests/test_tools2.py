@@ -66,8 +66,11 @@ def test_export_formats(tmp_path):
     p = tmp_path / "lib.csv"
     assert libexport.export_any(ts, p) == 2
     rows = list(csv.reader(open(p, encoding="utf-8-sig")))
-    assert rows[0][:3] == ["Title", "Artist", "Album"] and rows[1][0] == 'Sön, "quoted"' and rows[1][8] == "61.3"
-    assert rows[2][-1] == "Band/x.mp3" and rows[1][13] == ""                       # server tracks show their server path
+    head = rows[0]
+    assert head[:3] == ["Title", "Artist", "Album"] and rows[1][0] == 'Sön, "quoted"'
+    assert rows[1][head.index("Length (s)")] == "61.3" and rows[1][head.index("Last played")] == ""
+    assert rows[2][-1] == "Band/x.mp3"                                              # server tracks show their server path
+    assert {"Composer", "Comment", "BPM"} <= set(head)
     p = tmp_path / "lib.json"
     assert libexport.export_any(ts, p, ["title", "rating"]) == 2
     assert json.load(open(p))[0] == {"title": 'Sön, "quoted"', "rating": 4}

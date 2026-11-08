@@ -42,6 +42,10 @@ def make_server(state: State):
             if not ok:
                 return reply(status="failed", err={"code": 40, "message": "Wrong username or password"})
             state.calls.append((ep, {k: v for k, v in q.items() if k not in "utsvcf"}))
+            if ep == "stream":
+                data = b"FAKE-AUDIO-" + one("id", "").encode()
+                self.send_response(200); self.send_header("content-length", str(len(data))); self.end_headers()
+                self.wfile.write(data); return
             if ep == "ping": return reply()
             if ep == "getMusicFolders" and state.folders is not None:
                 return reply({"musicFolders": {"musicFolder": state.folders}})

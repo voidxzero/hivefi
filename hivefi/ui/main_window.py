@@ -19,14 +19,16 @@ from ..db import Database
 from ..mpris import Mpris
 from ..player import Player
 from ..subsonic import Subsonic, SubsonicError
-from .. import art, convert, coverart, folders, stats as libstats, libexport, listenbrainz, lyrics, radio, tagtools, organizer, rgscan, skins, smart, tagedit, updater
+from .. import art, convert, coverart, devicesync, inbox as inbox_mod, podcasts, folders, stats as libstats, libexport, listenbrainz, lyrics, radio, tagtools, organizer, rgscan, skins, smart, tagedit, updater
 from .album_grid import AlbumGrid
 from .dialogs import TagDialog
 from .audio_dialog import AudioDialog
 from .duplicates_dialog import DuplicatesDialog
 from . import shortcuts
 from .stats_dialog import StatsDialog
+from .devicesync_dialog import DeviceSyncDialog
 from .station_dialog import StationDialog
+from .watcher import FolderWatcher
 from .tagtools_dialog import TagToolsDialog
 from .tools_dialogs import ConvertDialog, MissingDialog, OrganizeDialog, ReplayGainDialog
 from .equalizer import EqualizerPanel
@@ -130,6 +132,11 @@ class MainWindow(PanelsMixin, QMainWindow):
         if cfg.header_state:
             self.table.horizontalHeader().restoreState(QByteArray.fromBase64(cfg.header_state.encode()))
             self._sorted_once = True
+            # Qt restores an older state with fewer columns happily and shows the new ones: keep the optional ones hidden
+            known = set(cfg.header_columns) or {c[1] for c in COLUMNS[:17]}      # states saved before this was recorded
+            for i, (_, key, _w) in enumerate(COLUMNS):
+                if key not in known and key in DEFAULT_HIDDEN:
+                    self.table.setColumnHidden(i, True)
         self.installEventFilter(self)
         self._set_edit_mode(False)                               # always starts locked; View → Edit Mode unlocks
         QTimer.singleShot(0, self._restore_splits)               # needs the window laid out at its final size
@@ -137,6 +144,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         self._set_view_mode(cfg.view_mode, initial=True)
         self._apply_skin_visuals()
         self.sleep_timer = QTimer(self, singleShot=True, timeout=self._sleep_fire)
+        self._setup_watch()
 
         self.sync_timer = QTimer(self, timeout=lambda: self.sync_now(silent=True))
         self._apply_sync_timer()
@@ -169,6 +177,8 @@ class MainWindow(PanelsMixin, QMainWindow):
             return QUrl.fromLocalFile(t["path"])
         if t["source"] == "radio":
             return QUrl(t["url"])
+        if t["source"] == "podcast":
+            return QUrl.fromLocalFile(t["path"]) if t.get("path") else QUrl(t["url"])
         if self.api is None:
             return QUrl()
         return QUrl(self.api.stream_url(t["remote_id"], self.cfg.max_bitrate))
@@ -369,12 +379,14 @@ class MainWindow(PanelsMixin, QMainWindow):
         tl = mb.addMenu("&Tools")
         tl.addAction("&Organise Files…", self._organize)
         tl.addAction("&Convert…", self._convert)
+        tl.addAction("S&ync to Device…", self._sync_device)
         tl.addAction("Scan &ReplayGain…", self._scan_rg)
         tl.addAction("Find Cover Art &Online…", self._find_covers_online)
         tl.addAction("&Batch Tag Tools…", self._tag_tools)
         tl.addAction("&Export Library / Selection…", self._export_tracks)
         tl.addSeparator()
         tl.addAction("Library &Statistics…", self._show_stats)
+        tl.addAction("Process &Inbox Now", self._process_inbox)
         tl.addAction("Find &Duplicates…", self._find_duplicates)
         tl.addAction("Find &Missing Files…", self._find_missing)
         h = mb.addMenu("&Help")
@@ -386,6 +398,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         self.lyrics_panel.seekRequested.connect(P.seek)
         self.lyrics_panel.searchOnline.connect(lambda: self._refresh_lyrics(force_online=True))
         P.streamTitle.connect(self._on_stream_title)
+        P.skipped.connect(self._on_skipped)
         P.trackChanged.connect(self._on_track)
         P.stateChanged.connect(lambda pl: self.act_play.setIcon(
             self._icon(QStyle.StandardPixmap.SP_MediaPause if pl else QStyle.StandardPixmap.SP_MediaPlay)))
@@ -429,6 +442,10 @@ class MainWindow(PanelsMixin, QMainWindow):
         self._items[("radio", None)] = rad
         for st in self.db.radio_stations():
             self._items[("radio", st["id"])] = item(rad, st["name"], ("radio", st["id"]))
+        pod = item(self.tree, "Podcasts", ("podcast", None))
+        self._items[("podcast", None)] = pod
+        for p in self.db.podcasts():
+            self._items[("podcast", p["id"])] = item(pod, p["title"], ("podcast", p["id"]))
         pls = item(self.tree, "Playlists", None)
         for p in self.db.playlists():
             if p["sync"] and not self.cfg.server_enabled:      # server-backed playlists hide with Navidrome
@@ -440,7 +457,7 @@ class MainWindow(PanelsMixin, QMainWindow):
             self._items[("smart", name)] = item(auto, name, ("smart", name))
         for sp in self.db.smart_playlists():
             self._items[("smart", sp["id"])] = item(auto, "★ " + sp["name"], ("smart", sp["id"]))
-        for top in (lib, pls, auto, rad):
+        for top in (lib, pls, auto, rad, pod):
             top.setExpanded(True)
         if self.cfg.server_configured:
             self._items[("remote", None)].setExpanded(True)
@@ -450,6 +467,98 @@ class MainWindow(PanelsMixin, QMainWindow):
         self.tree.blockSignals(False)
         if sel not in self._items:
             self.source = ("all", None); self.load_source()
+
+    # ------------------------------------------------ podcasts
+    def _podcast_dir(self):
+        from ..config import data_dir
+        return self.cfg.podcast_dir or str(data_dir() / "podcasts")
+
+    def _add_podcast(self, _checked=False):
+        url, ok = QInputDialog.getText(self, "Add Podcast", "Feed address (RSS):")
+        if not ok or not url.strip():
+            return
+        w = self._job(lambda _p: podcasts.subscribe(self.db, url), "Add Podcast")
+        def done(pid):
+            self.source = ("podcast", pid); self.refresh_playlists(); self.load_source()
+            self.statusBar().showMessage(f"Subscribed: {self.db.podcast(pid)['title']}", 6000)
+        w.failed.connect(lambda m: self.statusBar().showMessage(f"Could not add the podcast: {m}", 8000))
+        w.done.connect(done); self._run(w)
+
+    def _refresh_podcasts(self, quiet=True):
+        if not self.db.podcasts() or (getattr(self, "_pod_worker", None) and self._pod_worker.isRunning()):
+            return
+        folder = self._podcast_dir()
+        def job(prog):
+            new, errors, auto = 0, [], 0
+            for p in self.db.podcasts():
+                try:
+                    fresh = podcasts.refresh(self.db, p["id"])
+                    new += len(fresh)
+                    if self.db.podcast(p["id"])["auto_download"]:
+                        for e in fresh:
+                            try:
+                                podcasts.download(self.db, e["id"], folder, prog); auto += 1
+                            except Exception as ex:  # noqa: BLE001
+                                errors.append(f"{e['title']}: {ex}")
+                except Exception as ex:  # noqa: BLE001
+                    errors.append(f"{p['title']}: {ex}")
+            return new, auto, errors
+        w = self._job(job, "Podcasts")
+        def done(r):
+            new, auto, errors = r
+            if new:
+                self.statusBar().showMessage(f"{new} new podcast episode(s)" + (f", {auto} downloaded" if auto else ""), 8000)
+                self.refresh_playlists()
+                if self.source[0] == "podcast":
+                    self.load_source(keep=True)
+            if errors and not quiet:
+                QMessageBox.warning(self, "Podcasts", "\n".join(errors[:8]))
+        w.done.connect(done); self._pod_worker = w; self._run(w)
+
+    def _unsubscribe(self, pid):
+        p = self.db.podcast(pid)
+        if p and QMessageBox.question(self, "Unsubscribe", f"Unsubscribe from {p['title']}? Downloaded files are kept.") \
+                == QMessageBox.StandardButton.Yes:
+            self.db.delete_podcast(pid)
+            if self.source == ("podcast", pid):
+                self.source = ("podcast", None)
+            self.refresh_playlists(); self.load_source()
+
+    def _download_episodes(self, tracks):
+        ids = [podcasts.episode_id(t) for t in tracks if podcasts.episode_id(t) and not t.get("downloaded")]
+        folder = self._podcast_dir()
+        def job(prog):
+            errors = []
+            for i in ids:
+                try:
+                    podcasts.download(self.db, i, folder, prog)
+                except Exception as ex:  # noqa: BLE001
+                    errors.append(str(ex))
+            return errors
+        w = self._job(job, "Podcasts")
+        def done(errors):
+            self.statusBar().showMessage(f"Downloaded {len(ids) - len(errors)} episode(s)", 6000)
+            if errors:
+                QMessageBox.warning(self, "Podcasts", "\n".join(errors[:6]))
+            self.load_source(keep=True)
+        w.done.connect(done); self._run(w)
+
+    def _delete_episode_files(self, tracks):
+        for t in tracks:
+            eid = podcasts.episode_id(t)
+            if eid and t.get("path"):
+                try:
+                    os.remove(t["path"])
+                except OSError:
+                    pass
+                self.db.set_episode_file(eid, None)
+        self.load_source(keep=True)
+
+    def _mark_episodes(self, tracks, played):
+        for t in tracks:
+            if podcasts.episode_id(t):
+                self.db.set_episode_played(podcasts.episode_id(t), played)
+        self.load_source(keep=True)
 
     # ------------------------------------------------ internet radio
     def _station_dialog(self, st=None):
@@ -565,6 +674,10 @@ class MainWindow(PanelsMixin, QMainWindow):
         if kind == "all": tracks = self._tracks()
         elif kind == "remote" and arg is not None:
             tracks = [t for t in self._tracks("remote") if t.get("folder_id") == arg]
+        elif kind == "podcast":
+            pods = {p["id"]: p for p in self.db.podcasts()}
+            tracks = [podcasts.episode_track(e, pods[e["podcast_id"]]) for e in self.db.episodes(arg)
+                      if e["podcast_id"] in pods]
         elif kind == "history":
             tracks = self.cfg.enabled_tracks(self.db.play_history())
         elif kind == "radio":
@@ -581,7 +694,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         saved = (m.genre, m.artist, m.album) if keep else (None, None, None)
         m.genre = m.artist = m.album = m.ids = None
         hh = self.table.horizontalHeader()
-        if kind in ("queue", "playlist", "smart", "folder", "radio", "history"):   # these keep their own order
+        if kind in ("queue", "playlist", "smart", "folder", "radio", "history", "podcast"):   # these keep their own order
             hh.setSortIndicatorShown(False)
             m.set_tracks(tracks, sort_col=None)
         else:
@@ -601,7 +714,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         self._sel_changed()
 
     def _header_sort(self, section):
-        if self.source[0] in ("queue", "playlist", "smart", "folder", "radio", "history") or section in (0,):
+        if self.source[0] in ("queue", "playlist", "smart", "folder", "radio", "history", "podcast") or section in (0,):
             return
         hh = self.table.horizontalHeader()
         desc = hh.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder if hh.sortIndicatorSection() == section else False
@@ -726,6 +839,11 @@ class MainWindow(PanelsMixin, QMainWindow):
     def _on_played(self, t):
         if t["source"] == "radio":
             return
+        if t["source"] == "podcast":
+            if podcasts.episode_id(t):
+                self.db.set_episode_played(podcasts.episode_id(t))
+                self.model.update_track(t["id"], play_count=1)
+            return
         if self.cfg.listenbrainz_token and listenbrainz.queue_listen(self.db, t):
             self._lb_flush()
         self.db.bump_play(t["id"])
@@ -735,6 +853,14 @@ class MainWindow(PanelsMixin, QMainWindow):
         if t["source"] == "remote" and self.cfg.scrobble and self.api:
             self.db.queue_op("scrobble", {"id": t["remote_id"], "time_ms": int(time.time() * 1000)})
             self._kick_flush()
+
+    def _on_skipped(self, t):
+        if t.get("source") not in ("local", "remote") or not t.get("id"):
+            return
+        self.db.bump_skip(t["id"])
+        fresh = self.db.track(t["id"]) or {}
+        t["skip_count"] = fresh.get("skip_count", 0)
+        self.model.update_track(t["id"], skip_count=t["skip_count"])
 
     def _lb_flush(self):
         tok, base = self.cfg.listenbrainz_token, self.cfg.listenbrainz_url
@@ -802,6 +928,18 @@ class MainWindow(PanelsMixin, QMainWindow):
         m.addAction("Play Now", lambda: self.player.play_list(sel, 0))
         m.addAction("Play Next", lambda: self.player.enqueue(sel, next_=True))
         m.addAction("Queue Last", lambda: self.player.enqueue(sel))
+        if all(t["source"] == "podcast" for t in sel):
+            m.addSeparator()
+            for t in sel[:1]:
+                if len(sel) == 1 and not t.get("downloaded"):
+                    m.addAction("Download Episode", lambda: self._download_episodes(sel))
+                elif len(sel) == 1:
+                    m.addAction("Delete Downloaded File", lambda: self._delete_episode_files(sel))
+            if len(sel) > 1:
+                m.addAction("Download Episodes", lambda: self._download_episodes(sel))
+            played = all(t.get("play_count") for t in sel)
+            m.addAction("Mark as Unplayed" if played else "Mark as Played", lambda: self._mark_episodes(sel, not played))
+            m.exec(self.table.viewport().mapToGlobal(pos)); return
         if all(t["source"] == "radio" for t in sel):
             m.addSeparator()
             if len(sel) == 1:
@@ -854,6 +992,15 @@ class MainWindow(PanelsMixin, QMainWindow):
         elif d and d == ("remote", None):
             m.addAction("Turn Navidrome off" if self.cfg.server_enabled else "Turn Navidrome on",
                         lambda: self.set_library_enabled(Config.NAVIDROME, not self.cfg.server_enabled))
+        elif d and d[0] == "podcast":
+            m.addAction("Add Podcast…", self._add_podcast)
+            m.addAction("Refresh All", lambda: self._refresh_podcasts(quiet=False))
+            if d[1] is not None:
+                p = self.db.podcast(d[1])
+                a = m.addAction("Download new episodes automatically"); a.setCheckable(True)
+                a.setChecked(bool(p and p["auto_download"]))
+                a.toggled.connect(lambda on: self.db.set_podcast_auto(d[1], on))
+                m.addAction("Unsubscribe", lambda: self._unsubscribe(d[1]))
         elif d and d[0] == "radio":
             m.addAction("Add Station…", self._add_station)
             if d[1] is not None:
@@ -1072,6 +1219,91 @@ class MainWindow(PanelsMixin, QMainWindow):
         w = self._job(lambda prog: rgscan.scan_tracks(self.db, tr, prog, by_album=dlg.album.isChecked()),
                       "ReplayGain")
         w.done.connect(lambda r: (self._report("ReplayGain", r[0], r[1], "Tagged"), self._reload_tracks()))
+        self._run(w)
+
+    # ------------------------------------------------ folder monitoring and the inbox
+    def _setup_watch(self):
+        """(Re)start watching the library folders (and the inbox) according to the preferences."""
+        w = getattr(self, "_watcher", None)
+        if w is None:
+            w = self._watcher = FolderWatcher(self)
+            w.changed.connect(self._folders_changed)
+        c = self.cfg
+        roots = [d for d in c.library_dirs if c.lib_enabled(d) and os.path.isdir(d)] if c.watch_folders else []
+        if c.inbox_dir and os.path.isdir(c.inbox_dir):
+            roots.append(c.inbox_dir)
+        if not roots:
+            w.stop(); return 0
+        n = w.watch(roots)
+        if w.overflow:
+            self.statusBar().showMessage("Too many folders to watch them all; use Rescan Library for the rest", 8000)
+        return n
+
+    def _folders_changed(self):
+        if self.cfg.inbox_dir:
+            self._process_inbox(quiet=True)                      # rescans by itself when it moved something
+        if self.cfg.watch_folders:
+            self.scan_library(quiet=True)                        # files added straight into a library folder
+
+    def _inbox_target(self):
+        c = self.cfg
+        if c.inbox_target and os.path.isdir(c.inbox_target):
+            return c.inbox_target
+        return next((d for d in c.library_dirs if c.lib_enabled(d) and os.path.isdir(d)), "")
+
+    def _process_inbox(self, _checked=False, quiet=False, min_age=5.0):
+        c, target = self.cfg, self._inbox_target()
+        if not c.inbox_dir or not target:
+            if not quiet:
+                QMessageBox.information(self, "Inbox", "Choose an inbox folder and a library folder in Preferences → Library.")
+            return
+        if getattr(self, "_inbox_worker", None) and self._inbox_worker.isRunning():
+            return
+        inbox, pattern = c.inbox_dir, c.inbox_pattern
+        w = self._job(lambda _p: inbox_mod.process(inbox, target, pattern, min_age), "Inbox")
+        def done(res):
+            moved, left, errors = res
+            if moved:
+                self.statusBar().showMessage(f"Inbox: {len(moved)} file(s) moved into the library", 8000)
+                self.scan_library(quiet=True)
+            if errors and not quiet:
+                QMessageBox.warning(self, "Inbox", "\n".join(errors[:10]))
+            young = [p for p in left if os.path.exists(p)]
+            if young and quiet:                                 # still being copied: look again shortly
+                QTimer.singleShot(8000, lambda: self._process_inbox(quiet=True))
+        w.done.connect(done)
+        self._inbox_worker = w
+        self._run(w)
+
+    def _sync_device(self, _checked=False):
+        sources = []
+        sel = self._selected()
+        if sel:
+            sources.append(("Selected tracks", sel, None))
+        sources.append(("The tracks shown now", self._visible_tracks(), None))
+        sources.append(("All music", self._tracks(), None))
+        for p in self.db.playlists():
+            tr = self.cfg.enabled_tracks(self.db.playlist_tracks(p["id"]))
+            if tr:
+                sources.append((f"Playlist: {p['name']}", tr, p["name"]))
+        dlg = DeviceSyncDialog(sources, self, self.api)
+        if not dlg.exec():
+            return
+        o, tracks, name, api = dlg.options(), dlg.tracks(), dlg.playlist_name(), self.api
+        pl = devicesync.plan(tracks, o)
+        if o.delete_extra and pl.extra and QMessageBox.question(
+                self, "Sync to Device", f"{len(pl.extra)} music file(s) on the device are not part of this sync and "
+                "will be deleted. Continue?") != QMessageBox.StandardButton.Yes:
+            return
+        w = self._job(lambda prog: devicesync.execute(pl, o, api, prog, lambda: self._closing,
+                                                      {name: tracks} if name else None), "Sync to Device")
+        def done(st):
+            msg = (f"Synced: {st['copied']} copied, {st['converted']} converted, {st['downloaded']} downloaded, "
+                   f"{st['skipped']} up to date, {st['deleted']} deleted")
+            self.statusBar().showMessage(msg, 12000)
+            if st["errors"]:
+                QMessageBox.warning(self, "Sync to Device", "\n".join(st["errors"][:12]))
+        w.done.connect(done)
         self._run(w)
 
     def _tag_tools(self, tracks=None):
@@ -1518,6 +1750,7 @@ class MainWindow(PanelsMixin, QMainWindow):
             self.scan_library(quiet=True)
         if self.api and self.cfg.sync_on_start:
             self.sync_now(silent=True)
+        self._refresh_podcasts(quiet=True)
         if self.cfg.check_updates and not os.environ.get("HIVEFI_NO_UPDATE_CHECK"):
             self.check_updates()
 
@@ -1614,7 +1847,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         dlg = SettingsDialog(self.cfg, self)
         if dlg.exec():
             dlg.apply(); self._rebuild_api(); self._apply_sync_timer()
-            self.player.configure(); self._update_vis_availability()
+            self.player.configure(); self._update_vis_availability(); self._setup_watch()
             self._after_library_change()
             self.scan_library(quiet=True)
             if self.api: self.sync_now(silent=True)

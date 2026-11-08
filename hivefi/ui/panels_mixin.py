@@ -448,6 +448,8 @@ class PanelsMixin:
             self.cfg.geometry = _b64(self.saveGeometry())
             self.cfg.state = _b64(self.saveState(STATE_VERSION))
             self.cfg.header_state = _b64(self.table.horizontalHeader().saveState())
+            from .models import COLUMNS
+            self.cfg.header_columns = [c[1] for c in COLUMNS]
             self.cfg.browser_state = self._splits_json(self.browser_split)
             self.cfg.save()
             session.save(self._session_state())

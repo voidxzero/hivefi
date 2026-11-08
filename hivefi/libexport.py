@@ -4,7 +4,7 @@ import json
 import time
 
 COLUMNS = [("title", "Title"), ("artist", "Artist"), ("album", "Album"), ("album_artist", "Album artist"),
-           ("genre", "Genre"), ("year", "Year"), ("track_no", "Track"), ("disc_no", "Disc"), ("duration", "Length (s)"),
+           ("genre", "Genre"), ("composer", "Composer"), ("comment", "Comment"), ("bpm", "BPM"), ("year", "Year"), ("track_no", "Track"), ("disc_no", "Disc"), ("duration", "Length (s)"),
            ("bitrate", "Bitrate (kbps)"), ("suffix", "Format"), ("rating", "Rating"), ("play_count", "Plays"),
            ("last_played", "Last played"), ("date_added", "Date added"), ("source", "Source"), ("path", "Path")]
 DATE_FIELDS = ("last_played", "date_added")

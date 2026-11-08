@@ -48,6 +48,46 @@ def _gain(raw) -> float | None:
     return None
 
 
+def _text(v) -> str:
+    v = v[0] if isinstance(v, list) and v else v
+    if isinstance(v, (bytes, bytearray)):
+        return bytes(v).decode("utf-8", "replace").strip()
+    return str(getattr(v, "text", [v])[0] if hasattr(v, "text") and v.text else (v if not hasattr(v, "text") else "")).strip()
+
+
+def _extra(raw) -> dict:
+    """Composer, comment and BPM from whatever kind of tags the file has (ID3, Vorbis, MP4)."""
+    out = {"composer": "", "comment": "", "bpm": 0}
+    try:
+        tags = raw.tags
+        if tags is None:
+            return out
+        from mutagen.id3 import ID3
+        from mutagen.mp4 import MP4
+        if isinstance(tags, ID3):                                        # ID3
+            com = tags.getall("COMM")
+            out["comment"] = str(com[0].text[0]).strip() if com and com[0].text else ""
+            out["composer"] = _text(tags.get("TCOM")) if tags.get("TCOM") else ""
+            out["bpm"] = _int(_text(tags.get("TBPM"))) if tags.get("TBPM") else 0
+        elif isinstance(raw, MP4):
+            out["comment"] = _text(tags.get("\xa9cmt", [""]))             # MP4
+            out["composer"] = _text(tags.get("\xa9wrt", [""]))
+            out["bpm"] = int((tags.get("tmpo") or [0])[0] or 0)
+        else:                                                            # Vorbis comments (FLAC, Ogg, Opus)
+            def first(*keys):
+                for k in keys:
+                    for kk in (k, k.upper()):
+                        if kk in tags and tags[kk]:
+                            return str(tags[kk][0]).strip()
+                return ""
+            out["comment"] = first("comment", "description")
+            out["composer"] = first("composer")
+            out["bpm"] = _int(first("bpm"))
+    except Exception:  # noqa: BLE001 - odd tags must never stop a scan
+        pass
+    return out
+
+
 def read_tags(path: str) -> dict | None:
     try:
         easy = mutagen.File(path, easy=True)
@@ -60,9 +100,11 @@ def read_tags(path: str) -> dict | None:
     p = Path(path)
     rating = 0
     rg = None
+    extra = {"composer": "", "comment": "", "bpm": 0}
     try:  # POPM (mp3) or FMPS_RATING / RATING (vorbis)
         raw = mutagen.File(path)
         rg = _gain(raw) if raw is not None else None
+        extra = _extra(raw) if raw is not None else extra
         if raw is not None and raw.tags:
             if hasattr(raw.tags, "getall") and raw.tags.getall("POPM"):
                 v = raw.tags.getall("POPM")[0].rating
@@ -89,7 +131,7 @@ def read_tags(path: str) -> dict | None:
         bitrate=int((getattr(info, "bitrate", 0) or 0) / 1000),
         suffix=p.suffix.lstrip(".").lower(),
         size=os.path.getsize(path),
-        rating=rating, rg_gain=rg,
+        rating=rating, rg_gain=rg, **extra,
     )
 
 

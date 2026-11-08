@@ -8,7 +8,7 @@ from .. import tagtools
 OPS = [("title_case", "Title Case"), ("find_replace", "Find and replace"), ("tidy", "Trim extra spaces"),
        ("upper", "UPPER CASE"), ("lower", "lower case"), ("from_filename", "Fill tags from the file name")]
 FIELDS = [("title", "Title"), ("artist", "Artist"), ("album", "Album"), ("album_artist", "Album artist"),
-          ("genre", "Genre")]
+          ("genre", "Genre"), ("composer", "Composer"), ("comment", "Comment")]
 
 
 class TagToolsDialog(QDialog):

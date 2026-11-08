@@ -27,6 +27,7 @@ class Player(QObject):
     nowPlaying = pyqtSignal(object)
     error = pyqtSignal(str)
     notice = pyqtSignal(str)
+    skipped = pyqtSignal(object)             # the track was skipped (user moved on in its first quarter)
     streamTitle = pyqtSignal(str)            # "Artist - Title" announced by an internet radio stream
 
     def __init__(self, url_resolver, cfg, parent=None):
@@ -154,6 +155,8 @@ class Player(QObject):
 
     def jump(self, i):
         if 0 <= i < len(self.queue):
+            if i != self.index:
+                self._note_skip()
             self._load(i, manual=True)
 
     def _load(self, i, manual=False):
@@ -253,7 +256,21 @@ class Player(QObject):
             return self._order[n % len(self._order)]
         return None
 
+    SKIP_FRACTION = 0.25
+
+    def _note_skip(self):
+        """Count it as a skip when the user leaves a track in its first quarter (never for streams or counted plays)."""
+        t = self.current
+        if not t or self._counted or t.get("source") == "radio":
+            return
+        dur = self.mp.duration() or int((t.get("duration") or 0) * 1000)
+        if dur and self.mp.playbackState() == QMediaPlayer.PlaybackState.PlayingState \
+                and self.mp.position() < dur * self.SKIP_FRACTION:
+            self.skipped.emit(t)
+
     def next(self, *, manual=True):      # keyword-only: Qt signals must not smuggle in `checked`
+        if manual:
+            self._note_skip()
         i = self._step(1)
         if i is None and self.auto_dj:
             more = self.auto_dj()
@@ -270,6 +287,7 @@ class Player(QObject):
             self.mp.setPosition(0); return
         i = self._step(-1)
         if i is not None:
+            self._note_skip()
             self._load(i, manual=True)
 
     # --- internals

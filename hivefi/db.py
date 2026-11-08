@@ -43,6 +43,16 @@ CREATE TABLE IF NOT EXISTS plays(
 );
 CREATE INDEX IF NOT EXISTS ix_plays_at ON plays(played_at);
 CREATE INDEX IF NOT EXISTS ix_plays_track ON plays(track_id);
+CREATE TABLE IF NOT EXISTS podcasts(
+  id INTEGER PRIMARY KEY, title TEXT NOT NULL, feed_url TEXT NOT NULL UNIQUE, link TEXT DEFAULT '', image TEXT DEFAULT '',
+  last_checked REAL DEFAULT 0, auto_download INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS episodes(
+  id INTEGER PRIMARY KEY, podcast_id INTEGER NOT NULL REFERENCES podcasts(id) ON DELETE CASCADE, guid TEXT NOT NULL,
+  title TEXT, url TEXT NOT NULL, published REAL DEFAULT 0, duration REAL DEFAULT 0, size INTEGER DEFAULT 0,
+  description TEXT DEFAULT '', file TEXT, played INTEGER DEFAULT 0, position REAL DEFAULT 0, UNIQUE(podcast_id, guid)
+);
+CREATE INDEX IF NOT EXISTS ix_episodes_pod ON episodes(podcast_id, published);
 CREATE TABLE IF NOT EXISTS radio_stations(
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL UNIQUE, genre TEXT DEFAULT '', homepage TEXT DEFAULT '',
   remote_id TEXT
@@ -52,7 +62,7 @@ CREATE TABLE IF NOT EXISTS smart_playlists(id INTEGER PRIMARY KEY, name TEXT NOT
 
 TRACK_COLS = ("title artist album_artist album genre year track_no disc_no duration "
               "bitrate suffix size rating starred play_count last_played mtime cover_id rg_gain folder_id "
-              "album_id aa_tag rpath").split()
+              "album_id aa_tag rpath composer comment bpm").split()
 
 
 class Database:
@@ -72,6 +82,15 @@ class Database:
             self.conn.commit()
         if "folder_id" not in cols:   # migration: which Subsonic music folder (library) a server track came from
             self.conn.execute("ALTER TABLE tracks ADD COLUMN folder_id TEXT")
+            self.conn.commit()
+        if "skip_count" not in cols:  # migration: how often a track was skipped
+            self.conn.execute("ALTER TABLE tracks ADD COLUMN skip_count INTEGER DEFAULT 0")
+            self.conn.execute("ALTER TABLE tracks ADD COLUMN last_skipped REAL DEFAULT 0")
+            self.conn.commit()
+        if "composer" not in cols:    # migration: more tags (composer, comment, BPM); local files are re-read once
+            for col, typ in (("composer", "TEXT"), ("comment", "TEXT"), ("bpm", "INTEGER")):
+                self.conn.execute(f"ALTER TABLE tracks ADD COLUMN {col} {typ}")
+            self.conn.execute("UPDATE tracks SET mtime=0 WHERE source='local'")
             self.conn.commit()
         if "rpath" not in cols:       # migration: the server-side path of a track (for the folder view)
             self.conn.execute("ALTER TABLE tracks ADD COLUMN rpath TEXT")
@@ -261,6 +280,14 @@ class Database:
         cur = [t["id"] for t in self.playlist_tracks(pid)]
         self.set_playlist_tracks(pid, cur + list(track_ids))
 
+    def bump_skip(self, tid):
+        now = time.time()
+        self.conn.execute("UPDATE tracks SET skip_count=COALESCE(skip_count,0)+1, last_skipped=? WHERE id=?", (now, tid))
+        self.conn.commit()
+        t = self.track(tid)
+        if t:
+            self._patch([tid], skip_count=t["skip_count"], last_skipped=now)
+
     # ---- play log ------------------------------------------------------
     def plays_since(self, since=0.0):
         """[(track_id, played_at)] newest first."""
@@ -301,6 +328,65 @@ class Database:
 
     def delete_radio(self, sid):
         self.conn.execute("DELETE FROM radio_stations WHERE id=?", (sid,)); self.conn.commit()
+
+    # ---- podcasts ------------------------------------------------------
+    def podcasts(self):
+        return [dict(r) for r in self.conn.execute("SELECT * FROM podcasts ORDER BY title COLLATE NOCASE")]
+
+    def podcast(self, pid):
+        r = self.conn.execute("SELECT * FROM podcasts WHERE id=?", (pid,)).fetchone()
+        return dict(r) if r else None
+
+    def add_podcast(self, title, feed_url, link="", image=""):
+        self.conn.execute("INSERT OR IGNORE INTO podcasts(title, feed_url, link, image, last_checked) VALUES(?,?,?,?,?)",
+                          (title, feed_url, link, image, time.time()))
+        self.conn.commit()
+        return self.conn.execute("SELECT id FROM podcasts WHERE feed_url=?", (feed_url,)).fetchone()[0]
+
+    def touch_podcast(self, pid, title, link="", image=""):
+        self.conn.execute("UPDATE podcasts SET title=?, link=?, image=?, last_checked=? WHERE id=?",
+                          (title, link, image, time.time(), pid))
+        self.conn.commit()
+
+    def set_podcast_auto(self, pid, on):
+        self.conn.execute("UPDATE podcasts SET auto_download=? WHERE id=?", (int(on), pid)); self.conn.commit()
+
+    def delete_podcast(self, pid):
+        self.conn.execute("DELETE FROM podcasts WHERE id=?", (pid,)); self.conn.commit()
+
+    def add_episodes(self, pid, eps):
+        """Insert episodes not seen before (by guid); returns those as dicts (with ids)."""
+        known = {r[0] for r in self.conn.execute("SELECT guid FROM episodes WHERE podcast_id=?", (pid,))}
+        new = [e for e in eps if e["guid"] not in known]
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO episodes(podcast_id, guid, title, url, published, duration, size, description) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            [(pid, e["guid"], e["title"], e["url"], e["published"], e["duration"], e["size"], e["description"]) for e in new])
+        self.conn.commit()
+        return [self.episode_by_guid(pid, e["guid"]) for e in new]
+
+    def episode_by_guid(self, pid, guid):
+        r = self.conn.execute("SELECT * FROM episodes WHERE podcast_id=? AND guid=?", (pid, guid)).fetchone()
+        return dict(r) if r else None
+
+    def episode(self, eid):
+        r = self.conn.execute("SELECT * FROM episodes WHERE id=?", (eid,)).fetchone()
+        return dict(r) if r else None
+
+    def episodes(self, pid=None, unplayed=False):
+        q, args = "SELECT * FROM episodes", []
+        conds = (["podcast_id=?"] if pid else []) + (["played=0"] if unplayed else [])
+        if pid:
+            args.append(pid)
+        if conds:
+            q += " WHERE " + " AND ".join(conds)
+        return [dict(r) for r in self.conn.execute(q + " ORDER BY published DESC, id DESC", args)]
+
+    def set_episode_played(self, eid, played=True, position=0.0):
+        self.conn.execute("UPDATE episodes SET played=?, position=? WHERE id=?", (int(played), position, eid)); self.conn.commit()
+
+    def set_episode_file(self, eid, path):
+        self.conn.execute("UPDATE episodes SET file=? WHERE id=?", (path, eid)); self.conn.commit()
 
     # ---- smart playlists ----------------------------------------------
     def smart_playlists(self):

@@ -1,8 +1,16 @@
 """Write basic tags to local files with mutagen (EasyID3/Vorbis/MP4 abstraction)."""
 import mutagen
+from mutagen.easymp4 import EasyMP4Tags
+
+# The 'easy' MP4 layer lacks composer and BPM: teach it
+EasyMP4Tags.RegisterTextKey("composer", "\xa9wrt")
+EasyMP4Tags.RegisterKey("bpm", lambda tags, key: [str(v) for v in tags["tmpo"]],
+                        lambda tags, key, value: tags.__setitem__("tmpo", [int(v) for v in value]),
+                        lambda tags, key: tags.__delitem__("tmpo"))
 
 FIELD_TO_TAG = {"title": "title", "artist": "artist", "album": "album", "album_artist": "albumartist",
-                "genre": "genre", "year": "date", "track_no": "tracknumber", "disc_no": "discnumber"}
+                "genre": "genre", "year": "date", "track_no": "tracknumber", "disc_no": "discnumber",
+                "composer": "composer", "bpm": "bpm"}
 
 
 def write_tags(path: str, fields: dict):
@@ -13,9 +21,29 @@ def write_tags(path: str, fields: dict):
     if f.tags is None:
         f.add_tags()
     for k, v in fields.items():
-        if v in (None, "", 0):
+        if v in (None, "", 0) or k == "comment":
             continue
         f.tags[FIELD_TO_TAG[k]] = [str(v)]
+    f.save()
+    if fields.get("comment"):
+        _write_comment(path, str(fields["comment"]))
+
+
+def _write_comment(path: str, text: str):
+    """The comment has no common name in the 'easy' tag layer: ID3 COMM, Vorbis COMMENT, MP4 ©cmt."""
+    from mutagen.id3 import COMM, ID3
+    from mutagen.mp4 import MP4
+    f = mutagen.File(path)
+    if f is None:
+        raise ValueError("unsupported file type")
+    if isinstance(f, MP4):
+        f.tags["\xa9cmt"] = [text]
+    elif f.tags is not None and isinstance(f.tags, ID3):
+        f.tags.delall("COMM"); f.tags.add(COMM(encoding=3, lang="eng", desc="", text=[text]))
+    else:
+        if f.tags is None:
+            f.add_tags()
+        f.tags["comment"] = [text]
     f.save()
 
 

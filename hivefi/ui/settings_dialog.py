@@ -211,6 +211,19 @@ class SettingsDialog(QDialog):
         add.clicked.connect(self._add_dir)
         rem.clicked.connect(lambda: [self.dirs.takeItem(self.dirs.row(i)) for i in self.dirs.selectedItems()])
         row.addWidget(add); row.addWidget(rem); row.addStretch(); lv.addLayout(row)
+        self.watch = QCheckBox("Rescan automatically when files are added to these folders")
+        self.watch.setChecked(cfg.watch_folders)
+        self.inbox = QLineEdit(cfg.inbox_dir)
+        self.inbox.setPlaceholderText("Inbox folder (new music dropped here is moved into the library)")
+        ib = QPushButton("Browse…"); ib.clicked.connect(lambda: self._pick_into(self.inbox))
+        self.inbox_target = QComboBox(); self.inbox_target.setEditable(True)
+        self.inbox_target.addItems(cfg.library_dirs); self.inbox_target.setEditText(cfg.inbox_target)
+        self.inbox_target.setToolTip("Library folder the inbox files are moved into (empty = the first one)")
+        self.inbox_pattern = QLineEdit(cfg.inbox_pattern)
+        irow = QHBoxLayout(); irow.addWidget(self.inbox, 1); irow.addWidget(ib)
+        lv.addWidget(self.watch)
+        lv.addWidget(QLabel("Inbox: files are named from their tags and moved into:"))
+        lv.addLayout(irow); lv.addWidget(self.inbox_target); lv.addWidget(self.inbox_pattern)
         tabs.addTab(lib, "Library")
 
         # Server
@@ -289,6 +302,11 @@ class SettingsDialog(QDialog):
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
         lay = QVBoxLayout(self); lay.addWidget(tabs); lay.addWidget(bb)
+
+    def _pick_into(self, edit):
+        d = QFileDialog.getExistingDirectory(self, "Choose folder", edit.text())
+        if d:
+            edit.setText(d)
 
     def _add_dir(self):
         d = QFileDialog.getExistingDirectory(self, "Add music folder")
@@ -377,6 +395,8 @@ class SettingsDialog(QDialog):
         c.server_folders, names = self.chosen_server_folders()
         if names:
             c.server_folder_names = names
+        c.watch_folders, c.inbox_dir = self.watch.isChecked(), self.inbox.text().strip()
+        c.inbox_target, c.inbox_pattern = self.inbox_target.currentText().strip(), self.inbox_pattern.text().strip() or c.inbox_pattern
         c.lyrics_online, c.lyrics_save_sidecar = self.ly_online.isChecked(), self.ly_save.isChecked()
         c.listenbrainz_token = self.lb_token.text().strip()
         c.listenbrainz_url = self.lb_url.text().strip() or "https://api.listenbrainz.org"

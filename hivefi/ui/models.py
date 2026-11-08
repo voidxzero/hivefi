@@ -14,9 +14,11 @@ COLUMNS = [  # (header, key, width)
     ("Rating", "rating", 80), ("Plays", "play_count", 50), ("Source", "source", 70),
     ("Album Artist", "album_artist", 150), ("Disc", "disc_no", 40), ("Bitrate", "bitrate", 70),
     ("Format", "suffix", 55), ("Added", "date_added", 90), ("Last Played", "last_played", 100),
+    ("Composer", "composer", 130), ("BPM", "bpm", 50), ("Comment", "comment", 180), ("Skips", "skip_count", 50),
 ]
-DEFAULT_HIDDEN = ("album_artist", "disc_no", "bitrate", "suffix", "date_added", "last_played")
-RIGHT_ALIGNED = ("track_no", "year", "duration", "play_count", "disc_no", "bitrate")
+DEFAULT_HIDDEN = ("album_artist", "disc_no", "bitrate", "suffix", "date_added", "last_played", "composer", "bpm",
+                  "comment", "skip_count")
+RIGHT_ALIGNED = ("track_no", "year", "duration", "play_count", "disc_no", "bitrate", "bpm", "skip_count")
 
 
 def fmt_time(sec):
@@ -204,7 +206,7 @@ class TrackModel(QAbstractTableModel):
             v = t.get(key)
             if key == "duration": return "live" if t.get("source") == "radio" else fmt_time(v)
             if key == "rating": return "★" * (v or 0) + "☆" * (5 - (v or 0))
-            if key in ("track_no", "year", "play_count", "disc_no"): return str(v) if v else ""
+            if key in ("track_no", "year", "play_count", "disc_no", "bpm", "skip_count"): return str(v) if v else ""
             if key == "bitrate": return f"{v} kbps" if v else ""
             if key == "suffix": return (v or "").upper()
             if key in ("date_added", "last_played"):

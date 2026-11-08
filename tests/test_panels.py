@@ -606,3 +606,46 @@ def test_keyboard_shortcuts_editor(win):
     t2.reset_all(); dlg2.apply()
     assert w.cfg.shortcuts == {} and reg["Playback ▸ Play/Pause"].shortcut().toString() == "Ctrl+Space"
     assert reg["Playback ▸ Next"].shortcut().toString() == "Ctrl+Right"
+
+
+def test_old_column_layout_is_handled(win):
+    """Qt restores a header state saved with fewer columns and shows the new ones: the optional ones must stay hidden."""
+    import base64
+    from PyQt6.QtGui import QStandardItemModel
+    from PyQt6.QtWidgets import QTableView
+    from hivefi.db import Database
+    from hivefi.ui.main_window import MainWindow
+    from hivefi.ui.models import COLUMNS, DEFAULT_HIDDEN
+    w = win
+    old_n = len(COLUMNS) - 4                                           # the 17 columns of the earlier version
+    old = QTableView(); old.setModel(QStandardItemModel(1, old_n))
+    for i, (_, k, _w) in enumerate(COLUMNS[:old_n]):
+        old.setColumnHidden(i, k in DEFAULT_HIDDEN)
+    old.setColumnWidth(2, 333)                                         # the user's own width must survive
+    state = old.horizontalHeader().saveState()
+    raw = QTableView(); raw.setModel(QStandardItemModel(1, len(COLUMNS)))      # what Qt alone does with that state
+    assert raw.horizontalHeader().restoreState(state) is True
+    assert not raw.isColumnHidden(len(COLUMNS) - 1)                    # ... shows the new columns (the reason for the fix)
+    def start(columns):
+        cfg = Config(); cfg._path = w.cfg._path; cfg.library_dirs = w.cfg.library_dirs; cfg.show_tray = False
+        cfg.server_url = w.cfg.server_url; cfg.username, cfg.password = "u", "pw"; cfg.sync_on_start = False
+        cfg.header_state = base64.b64encode(bytes(state)).decode(); cfg.header_columns = columns
+        w2 = MainWindow(cfg, Database(w.db.path)); w2.show(); ready(w2)
+        return w2
+    w.player.stop(); w.player.mp.shutdown()
+    for columns in ([], [c[1] for c in COLUMNS[:old_n]]):              # an old config, and one that recorded its columns
+        w2 = start(columns)
+        try:
+            hidden = {COLUMNS[i][1] for i in range(len(COLUMNS)) if w2.table.isColumnHidden(i)}
+            assert hidden == set(DEFAULT_HIDDEN), hidden               # optional columns stay hidden, the rest stay visible
+            assert w2.table.columnWidth(COLUMNS.index(next(c for c in COLUMNS if c[1] == "title"))) == 333
+        finally:
+            w2.player.stop(); w2.player.mp.shutdown()
+    # a column the user chose to show is remembered as shown: it is in the saved list, so nothing re-hides it
+    w3 = start([c[1] for c in COLUMNS])
+    try:
+        w3.table.setColumnHidden([c[1] for c in COLUMNS].index("composer"), False)
+        w3._save_session()
+        assert w3.cfg.header_columns == [c[1] for c in COLUMNS]
+    finally:
+        w3.player.stop(); w3.player.mp.shutdown()

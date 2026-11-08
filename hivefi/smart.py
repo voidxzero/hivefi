@@ -4,7 +4,8 @@ import time
 FIELDS = {  # key: (label, kind)
     "title": ("Title", "text"), "artist": ("Artist", "text"), "album": ("Album", "text"),
     "album_artist": ("Album Artist", "text"), "genre": ("Genre", "text"), "suffix": ("Format", "text"),
-    "source": ("Source (local/remote)", "text"),
+    "source": ("Source (local/remote)", "text"), "composer": ("Composer", "text"), "comment": ("Comment", "text"),
+    "bpm": ("BPM", "num"), "skip_count": ("Skip Count", "num"), "last_skipped": ("Last Skipped", "date"),
     "year": ("Year", "num"), "rating": ("Rating (0-5)", "num"), "play_count": ("Play Count", "num"),
     "duration": ("Length (seconds)", "num"), "bitrate": ("Bitrate", "num"),
     "track_no": ("Track #", "num"), "disc_no": ("Disc #", "num"),
@@ -30,6 +31,8 @@ PRESETS = {
                   "limit": 0, "order": "rating", "desc": True},
     "Never Played": {"match": "all", "rules": [{"field": "play_count", "op": "=", "value": "0"}],
                      "limit": 0, "order": "artist", "desc": False},
+    "Often Skipped": {"match": "all", "rules": [{"field": "skip_count", "op": ">=", "value": "3"}],
+                      "limit": 0, "order": "skip_count", "desc": True},
     "Starred": {"match": "all", "rules": [{"field": "starred", "op": "is true", "value": ""}],
                 "limit": 0, "order": "artist", "desc": False},
 }

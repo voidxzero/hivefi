@@ -85,6 +85,8 @@ class Config:
     geometry: str = ""
     state: str = ""                      # dock layout (QMainWindow.saveState)
     header_state: str = ""               # track table columns (order/width/visibility)
+    header_columns: list = field(default_factory=list)   # the columns that state was saved with (new ones start hidden)
+    header_columns: list = field(default_factory=list)   # which columns that state was saved with (new ones start hidden)
     skin: str = "Dark"
     view_mode: str = "browser"           # browser | albums
     show_tray: bool = True
@@ -112,6 +114,11 @@ class Config:
     shortcuts: dict = field(default_factory=dict)        # menu command -> shortcut ('' = none); only the changed ones
     lyrics_online: bool = False          # look tracks without lyrics up on LRCLIB (sends artist/title/album)
     lyrics_save_sidecar: bool = False    # keep what was found as a .lrc/.txt file beside the song
+    watch_folders: bool = False          # rescan automatically when files appear in the library folders
+    inbox_dir: str = ""                  # new music dropped here is tagged-named and moved into the library
+    inbox_target: str = ""               # library folder the inbox files go to (default: the first enabled one)
+    inbox_pattern: str = "%albumartist%/%album%/%disc%%track% - %title%"
+    podcast_dir: str = ""                # where downloaded episodes go (empty = the app's data folder)
     check_updates: bool = True           # look for a newer version on GitHub at startup
     github_token: str = ""               # optional; needed to update from a private repo (else `gh auth token`)
 

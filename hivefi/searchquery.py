@@ -2,16 +2,17 @@
 
     beatles abbey            every word must appear in title / artist / album / genre
     "dark side"              a phrase
-    artist:pink album:wall   fields: title artist album albumartist genre year rating plays format source folder
+    artist:pink album:wall   fields: title artist album albumartist genre composer comment year rating plays bpm format
+                             source folder
     year:1990-1999  year:>=2000  rating:>=4  plays:0   numbers: = > < >= <= and ranges
     -live  -genre:rock       a minus sign excludes
 """
 import re
 
 TEXT_FIELDS = {"title": "title", "artist": "artist", "album": "album", "albumartist": "album_artist",
-               "genre": "genre", "format": "suffix", "source": "source"}
+               "genre": "genre", "format": "suffix", "source": "source", "composer": "composer", "comment": "comment"}
 NUM_FIELDS = {"year": "year", "rating": "rating", "plays": "play_count", "bitrate": "bitrate", "track": "track_no",
-              "disc": "disc_no"}
+              "disc": "disc_no", "bpm": "bpm", "skips": "skip_count"}
 _TOKEN = re.compile(r'(-?)(?:(\w+):)?(?:"([^"]*)"|(\S+))')
 
 

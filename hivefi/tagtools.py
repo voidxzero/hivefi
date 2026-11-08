@@ -6,7 +6,7 @@ SMALL_WORDS = {"a", "an", "and", "as", "at", "but", "by", "for", "from", "in", "
                "vs", "vs.", "via", "with"}
 ROMAN = {"ii", "iii", "iv", "vi", "vii", "viii", "ix", "xi", "xii"}
 KEEP_UPPER = re.compile(r"^(?:[A-Z]{2,4}|[IVXLC]+|\d+[a-z]*)$")          # DJ, MC, II, 2nd...
-FIELDS = ("title", "artist", "album", "album_artist", "genre")
+FIELDS = ("title", "artist", "album", "album_artist", "genre", "composer", "comment")
 
 
 def title_case(s: str) -> str:
@@ -87,7 +87,7 @@ def apply_operation(t: dict, op: str, field: str = "title", **p) -> dict:
                 changes[k] = v
         return changes
     old = t.get(field) or ""
-    if not isinstance(old, str):
+    if field not in FIELDS or not isinstance(old, str):
         return {}
     new = {"title_case": lambda: title_case(old), "tidy": lambda: tidy(old), "upper": lambda: old.upper(),
            "lower": lambda: old.lower(),
