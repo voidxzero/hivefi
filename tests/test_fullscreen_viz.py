@@ -6,7 +6,7 @@ import time
 
 import pytest
 from PyQt6.QtCore import QPoint, Qt
-from PyQt6.QtGui import QImage, QPainter
+from PyQt6.QtGui import QColor, QImage, QPainter
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
@@ -319,3 +319,42 @@ def test_opens_with_a_saved_fixed_effect(name):
         loud(fs.audio); fs.repaint()
     assert fs.effect.name == name and not fs.auto and not failed
     fs.close()
+
+
+@pytest.mark.skipif(np is None, reason="numpy needed")
+def test_warp_works_on_the_image_itself_and_keeps_it_opaque():
+    fb = vizfx.Feedback(64, 36)
+    p = QPainter(fb.image); p.fillRect(20, 10, 8, 8, QColor(255, 128, 0)); p.end()
+    before = fb.image.pixelColor(24, 14)
+    fb.warp(zoom=1.0, decay=0.5)                               # identity warp, half brightness
+    after = fb.image.pixelColor(24, 14)                        # read through Qt: numpy must have written the image
+    assert (after.red(), after.green()) == (before.red() // 2, before.green() // 2)
+    fb.warp(zoom=1.05, rot=0.1, ripple=0.03, hue=(0.03, -0.01, 0.02), mirror=True)
+    assert (fb.buf[..., 3] == 255).all()
+    m = fb.buf[..., :3].astype(int)
+    assert abs(m - m[:, ::-1]).max() <= 1 and abs(m - m[::-1]).max() <= 1   # mirror: symmetric both ways
+
+
+def test_soft_effects_render_through_a_smaller_buffer():
+    from hivefi.ui.viz_fullscreen import FullscreenVisualizer
+    cfg = Config(); cfg.vis_full_effect = "Scope"
+    fs = FullscreenVisualizer(cfg); fs.resize(1600, 900); fs.show()
+    for _ in range(5):
+        loud(fs.audio); img = fs.grab().toImage()                # grab() paints the window, offscreen too
+    assert fs._soft is not None and fs._soft.width() == 960 and not fs.broken
+    assert any(img.pixelColor(x, y).value() > 60 for x in range(0, 1600, 40) for y in range(0, 900, 20))
+    fs.close()
+
+
+def test_panel_pauses_and_spectrogram_ring():
+    from hivefi.ui.visualizer import VisualizerPanel
+    v = VisualizerPanel(style="spectrogram", bars=32); v.resize(200, 100); v.show()
+    assert v._timer.isActive()
+    v.set_paused(True); assert not v._timer.isActive()
+    v.set_paused(False); assert v._timer.isActive()
+    for _ in range(150):                                       # more columns than the width: the ring wraps
+        v.feed([-20.0] * 512, {"rms": [-20, -20], "peak": [-6, -6]}); v._tick()
+    assert 0 <= v._spectro_x < 200 and v._spectro_x % 2 == 0
+    img = v.grab().toImage()
+    assert img.pixelColor(100, 50).value() > 0                 # filled across, no black seam in the middle
+    v.close()

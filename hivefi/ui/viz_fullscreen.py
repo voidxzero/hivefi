@@ -31,11 +31,13 @@ class FullscreenVisualizer(QWidget):
         self.overlay = True
         self._overlay_at = time.monotonic()
         self._fb: vizfx.Feedback | None = None
+        self._soft: QImage | None = None                   # reduced-size buffer for the soft classic effects
         self._last = time.monotonic()
         self._cursor_at = time.monotonic()
         self._order: list[int] = []
         self.broken: set[str] = set()
         self.timer = QTimer(self, interval=33, timeout=self._tick)
+        self.timer.setTimerType(Qt.TimerType.PreciseTimer)    # even frame spacing: a coarse timer jitters by +-5%
         self.frames = 0
         # last: switching effects touches the state above (the feedback buffer...). Selecting the saved effect before it
         # existed raised AttributeError, which took the whole program down whenever a fixed effect had been chosen.
@@ -135,6 +137,8 @@ class FullscreenVisualizer(QWidget):
                 e.paint_into(fb, self.audio)
                 p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
                 p.drawImage(QRectF(0, 0, w, h), fb.image)
+            elif e.soft:
+                self._paint_soft(p, e, w, h)
             else:
                 p.fillRect(self.rect(), QColor(0, 0, 0))
                 p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -144,6 +148,24 @@ class FullscreenVisualizer(QWidget):
             self._effect_failed(e, ex)
         finally:
             p.end()
+
+    def _paint_soft(self, p, e, w, h):
+        """Draw a soft effect into a smaller image and scale it up: the cost no longer grows with the screen size
+        (Scope took 130-200 ms a frame at 1080p-1440p, 4-6 times the frame budget) and glows look the same."""
+        bw = min(w, 2 * vizfx.QUALITY.get(self.cfg.vis_full_quality, 480))
+        bh = max(1, round(bw * h / w))
+        if self._soft is None or self._soft.width() != bw or self._soft.height() != bh:
+            self._soft = QImage(bw, bh, QImage.Format.Format_ARGB32_Premultiplied)
+        self._soft.fill(0xFF000000)
+        q = QPainter(self._soft)
+        try:
+            q.setRenderHint(QPainter.RenderHint.Antialiasing)
+            q.scale(bw / w, bh / h)                            # the effect still works in window coordinates
+            e.paint(q, w, h, self.audio)
+        finally:
+            q.end()                                            # never leave the buffer locked if the effect fails
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        p.drawImage(QRectF(0, 0, w, h), self._soft)
 
     def _effect_failed(self, e, ex):
         """A broken effect must never take the program down: report it, skip it from now on, show the next one."""

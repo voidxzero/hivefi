@@ -77,6 +77,10 @@ class VisualizerPanel(QWidget):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._menu)
         self._timer = QTimer(self, interval=33, timeout=self._tick)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._paused = False
+        self._theme_key = self._theme_val = None
+        self._spectro_x = 0                         # ring buffer: the column the next slice goes into
 
     # ---- data in
     def feed(self, mags, levels):
@@ -101,7 +105,19 @@ class VisualizerPanel(QWidget):
 
     # ---- animation
     def showEvent(self, e):
-        super().showEvent(e); self._timer.start(); self.activeChanged.emit(True)
+        super().showEvent(e)
+        if not self._paused:
+            self._timer.start()
+        self.activeChanged.emit(True)
+
+    def set_paused(self, on):
+        """Stop animating while the full-screen visualizer covers the window (being covered does not hide a widget,
+        so it would otherwise keep drawing every frame behind it and slow the full-screen one down)."""
+        self._paused = bool(on)
+        if on:
+            self._timer.stop()
+        elif self.isVisible():
+            self._timer.start()
 
     def hideEvent(self, e):
         super().hideEvent(e); self._timer.stop(); self.activeChanged.emit(False)
@@ -142,8 +158,16 @@ class VisualizerPanel(QWidget):
         self.update()
 
     def _theme(self):
-        """(low, mid, hot, cap) colours of the chosen scheme; None entries mean 'rainbow'."""
+        """(low, mid, hot, cap) colours of the chosen scheme; None entries mean 'rainbow'. Worked out once per
+        scheme / skin, not for every bar of every frame."""
         accent, _bg, fg = self._colors()
+        key = (self.scheme, tuple(self.custom), accent.rgba(), fg.rgba())
+        if key != self._theme_key:
+            self._theme_key, self._theme_val = key, self._make_theme(accent, fg)
+            self._ramp_lut = None
+        return self._theme_val
+
+    def _make_theme(self, accent, fg):
         if self.scheme == "skin":
             low = QColor(accent); low.setHsv(low.hue(), min(255, low.saturation() + 30), max(90, low.value() - 60))
             return low, accent, QColor.fromHsv((accent.hue() + 40) % 360, 220, 255), fg
@@ -158,6 +182,27 @@ class VisualizerPanel(QWidget):
     def _ramp(self, v):
         """Colour for an intensity 0..1 along low -> mid -> hot (rainbow: a hue sweep)."""
         low, mid, hot, _cap = self._theme()
+        return self._ramp_of(v, low, mid, hot)
+
+    def _spectro_color(self, v):
+        """Spectrogram colour for 0..1, from a 256-step table built once per scheme."""
+        self._theme()
+        if self._ramp_lut is None:
+            lut = []
+            for i in range(256):
+                x = i / 255
+                if x <= 0.02:
+                    lut.append(QColor(0, 0, 0)); continue
+                c = self._ramp(x)
+                if self.scheme != "rainbow":
+                    k = min(1.0, 0.25 + x)
+                    c = QColor(round(c.red() * k), round(c.green() * k), round(c.blue() * k))
+                lut.append(c)
+            self._ramp_lut = lut
+        return self._ramp_lut[max(0, min(255, int(v * 255)))]
+
+    @staticmethod
+    def _ramp_of(v, low, mid, hot):
         if low is None:
             return QColor.fromHsvF(max(0.0, 0.75 - v * 0.75), 0.9, 1.0)
         if v < 0.5:
@@ -262,27 +307,30 @@ class VisualizerPanel(QWidget):
                        QPointF(cx + math.cos(a) * r1, cy + math.sin(a) * r1))
 
     def _push_spectro(self):
+        """Add the newest slice. The image is a ring: nothing is scrolled or copied, the slice goes into the next
+        column and painting starts after it. One block per bar instead of one fill per pixel row."""
         w, h = max(2, self.width()), max(2, self.height())
         if self._spectro is None or self._spectro.height() != h or self._spectro.width() != w:
             self._spectro = QImage(w, h, QImage.Format.Format_RGB32); self._spectro.fill(Qt.GlobalColor.black)
+            self._spectro_x = 0
         step = 2
-        old = self._spectro.copy()
-        img = self._spectro
-        q = QPainter(img)
-        q.drawImage(-step, 0, old)                               # scroll left, then draw the newest column
+        x = self._spectro_x
+        q = QPainter(self._spectro)
         n = len(self._bars)
-        for y in range(h):
-            v = self._bars[min(n - 1, int((h - 1 - y) * n / h))]
-            c = self._ramp(v) if v > 0.02 else QColor(0, 0, 0)
-            if v > 0.02 and self.scheme != "rainbow":
-                k = min(1.0, 0.25 + v)
-                c = QColor(round(c.red() * k), round(c.green() * k), round(c.blue() * k))
-            q.fillRect(w - step, y, step, 1, c)
+        for i, v in enumerate(self._bars):                       # bar i covers rows [top, bottom) counted from the bottom
+            top, bottom = h - round((i + 1) * h / n), h - round(i * h / n)
+            q.fillRect(x, top, step, bottom - top, self._spectro_color(v))
         q.end()
+        self._spectro_x = (x + step) % (w - w % step or step)
 
     def _paint_spectrogram(self, p, w, h, accent, fg):
-        if self._spectro is not None:
-            p.drawImage(0, 0, self._spectro)
+        img = self._spectro
+        if img is None:
+            return
+        x, iw = self._spectro_x, img.width() - img.width() % 2
+        p.drawImage(0, 0, img, x, 0, iw - x, img.height())        # oldest part (after the write position) first
+        if x:
+            p.drawImage(iw - x, 0, img, 0, 0, x, img.height())
 
     def _paint_vu(self, p, w, h, accent, fg):
         rows = 2

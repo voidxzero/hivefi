@@ -110,6 +110,8 @@ class Effect:
     name = "effect"
     family = "classic"                    # "classic" | "milkdrop"
     needs_numpy = False
+    soft = False                          # soft-edged: drawn at reduced resolution and scaled up (antialiased wide
+                                          # strokes and big gradients are very slow at full-screen size)
 
     def reset(self, w, h):
         """Called when the effect is shown or the window size changes."""
@@ -139,19 +141,24 @@ class Bars(Effect):
 
 class Scope(Effect):
     name = "Scope"
+    soft = True
 
     def paint(self, p, w, h, a):
         pts = a.wave(160)
+        poly = QPolygonF([QPointF(i / (len(pts) - 1) * w, h / 2 + v * h * 0.38) for i, v in enumerate(pts)])
         for width, alpha in ((14, 28), (7, 60), (2.5, 255)):
+            # antialiasing only on the thin bright core: on the faint wide glows it is invisible but made each of them
+            # cost ~10 ms (Qt's antialiased stroker is slow on long wiggly lines)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, width < 4)
             pen = QPen(hsv(a.t * 0.05 + 0.5, 0.7, 1.0, alpha), width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                        Qt.PenJoinStyle.RoundJoin)
             p.setPen(pen)
-            poly = QPolygonF([QPointF(i / (len(pts) - 1) * w, h / 2 + v * h * 0.38) for i, v in enumerate(pts)])
             p.drawPolyline(poly)
 
 
 class Ambience(Effect):
     name = "Ambience"
+    soft = True
 
     def __init__(self):
         rnd = random.Random(7)
@@ -221,6 +228,7 @@ class Particles(Effect):
 
 class Spikes(Effect):
     name = "Spikes"
+    soft = True
 
     def paint(self, p, w, h, a):
         cx, cy, n = w / 2, h / 2, Audio.N * 2
@@ -231,7 +239,7 @@ class Spikes(Effect):
             ang = rot + i / n * 6.2832
             r1, r2 = base, base + v * min(w, h) * 0.42 + 4
             p.setPen(QPen(hsv(i / n + a.t * 0.04, 0.85, 1.0), max(2.0, w / 260), Qt.PenStyle.SolidLine,
-                          Qt.PenCapStyle.RoundCap))
+                          Qt.PenCapStyle.FlatCap))           # round caps more than doubled the cost of every spike
             p.drawLine(QPointF(cx + math.cos(ang) * r1, cy + math.sin(ang) * r1),
                        QPointF(cx + math.cos(ang) * r2, cy + math.sin(ang) * r2))
 
@@ -266,48 +274,75 @@ class Feedback:
 
     def __init__(self, w, h):
         self.w, self.h = w, h
-        # The numpy array is a view of the QImage's own memory: painting with QPainter and warping with numpy act on
+        # The numpy arrays are views of the QImage's own memory: painting with QPainter and warping with numpy act on
         # the same pixels. (Handing numpy memory to QImage's constructor makes Qt work on a copy, which silently turned
-        # the feedback loop into plain accumulation.)
+        # the feedback loop into plain accumulation.) They are only ever written in place, never rebound.
         self.image = QImage(w, h, QImage.Format.Format_RGB32)
         self.image.fill(0xFF000000)
         ptr = self.image.bits()
         ptr.setsize(self.image.sizeInBytes())
-        self.buf = np.frombuffer(ptr, np.uint8).reshape(h, self.image.bytesPerLine() // 4, 4)[:, :w]
+        stride = self.image.bytesPerLine() // 4
+        self.buf = np.frombuffer(ptr, np.uint8).reshape(h, stride, 4)[:, :w]
+        self.px = np.frombuffer(ptr, np.uint32).reshape(h, stride)[:, :w]      # whole pixels, same memory
+        self.stride = stride
         aspect = w / h
-        ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
-        self.U = (xs / max(1, w - 1) * 2 - 1) * aspect           # -aspect..aspect
-        self.V = ys / max(1, h - 1) * 2 - 1                      # -1..1
+        self.U = (np.arange(w, dtype=np.float32) / max(1, w - 1) * 2 - 1) * aspect     # one row: -aspect..aspect
+        self.V = (np.arange(h, dtype=np.float32) / max(1, h - 1) * 2 - 1)[:, None]     # one column: -1..1
         self.aspect = aspect
+        self._ramp = np.arange(256, dtype=np.float32)
 
     def clear(self):
-        self.buf[..., :3] = 0
+        self.px[...] = 0xFF000000
 
     def warp(self, zoom=1.0, rot=0.0, cx=0.0, cy=0.0, dx=0.0, dy=0.0, ripple=0.0, freq=6.0, t=0.0, decay=0.95,
              hue=(0.0, 0.0, 0.0), mirror=False):
         """Replace the buffer with a transformed, faded copy of itself. Pixel p takes its colour from
-        centre + R(-rot)(p - centre)/zoom + (dx, dy) + ripple, so zoom > 1 grows the picture outward."""
-        U, V = self.U - cx, self.V - cy
+        centre + R(-rot)(p - centre)/zoom + (dx, dy) + ripple, so zoom > 1 grows the picture outward.
+
+        Done on whole 32-bit pixels (one gather instead of four byte gathers), with the fade and colour drift as
+        256-entry lookup tables instead of float maths on every channel of every pixel."""
+        w, h = self.w, self.h
+        U = self.U - cx                                          # (w,) row
+        V = self.V - cy                                          # (h, 1) column
         if ripple:
-            U = U + ripple * np.sin(V * freq + t * 1.3).astype(np.float32)
-            V = V + ripple * np.cos(U * freq + t * 0.9).astype(np.float32)
+            U = U + ripple * np.sin(V * freq + t * 1.3)          # depends on the row only: h sines, broadcast to (h, w)
+            V = V + ripple * np.cos(U * freq + t * 0.9)
         c, s = math.cos(-rot), math.sin(-rot)
         inv = 1.0 / max(0.05, zoom)
-        su = (c * U - s * V) * inv + cx + dx
-        sv = (s * U + c * V) * inv + cy + dy
-        ix = np.clip(((su / self.aspect + 1) * 0.5 * (self.w - 1) + 0.5).astype(np.int32), 0, self.w - 1)
-        iy = np.clip(((sv + 1) * 0.5 * (self.h - 1) + 0.5).astype(np.int32), 0, self.h - 1)
-        flat = self.buf.reshape(-1, 4)[iy * self.w + ix]
-        out = flat[..., :3].astype(np.float32) * decay
-        if any(hue):                                             # per-channel drift: the palette slowly turns
-            out *= np.array([1.0 + hue[2], 1.0 + hue[1], 1.0 + hue[0]], np.float32)
-            roll = int(round(abs(hue[0]) * 40)) % 3
-            if roll:
-                out = np.roll(out, roll if hue[0] > 0 else -roll, axis=2)
-        if mirror:                                               # kaleidoscope: average with the mirror image (max would wash out)
-            out = (out + out[:, ::-1]) * 0.5
-            out = (out + out[::-1]) * 0.5
-        self.buf[..., :3] = np.clip(out, 0, 255).astype(np.uint8)
+        # source pixel coordinates, folded straight into pixel units
+        kx, ky = 0.5 * (w - 1) / self.aspect, 0.5 * (h - 1)
+        sx = (c * inv * kx) * U - (s * inv * kx) * V + ((cx + dx) / self.aspect + 1) * 0.5 * (w - 1) + 0.5
+        sy = (s * inv * ky) * U + (c * inv * ky) * V + (cy + dy + 1) * 0.5 * (h - 1) + 0.5
+        ix = np.clip(sx, 0, w - 1).astype(np.int32)
+        iy = np.clip(sy, 0, h - 1).astype(np.int32)
+        iy *= w
+        iy += ix
+        # RGB32 rows are never padded, so this is a view of the image (padding would make it a copy: still correct)
+        src = self.px.reshape(-1) if self.stride == w else np.ascontiguousarray(self.px).reshape(-1)
+        g = src.take(iy)                                         # (h, w) uint32, read before anything is written
+        b = g.view(np.uint8).reshape(h, w, 4)
+        mult = (1.0 + hue[2], 1.0 + hue[1], 1.0 + hue[0])         # B, G, R (little-endian RGB32)
+        roll = int(round(abs(hue[0]) * 40)) % 3 if any(hue) else 0
+        if roll and hue[0] < 0:
+            roll = -roll
+        out = np.empty((h, w, 4), np.uint8)
+        for ch in range(3):                                      # out[c] = old[(c - roll) % 3], faded and tinted
+            sc = (ch - roll) % 3
+            lut = np.clip(self._ramp * (decay * mult[sc]), 0, 255).astype(np.uint8)
+            out[..., ch] = lut[b[..., sc]]
+        out[..., 3] = 255
+        o = out.view(np.uint32).reshape(h, w)
+        if mirror:                                               # kaleidoscope: average with the mirror images
+            o = _avg(_avg(o, o[:, ::-1]), None)
+        self.px[...] = o
+
+
+def _avg(a, b):
+    """Per-byte average (rounded down) of two uint32 pixel arrays, all four channels at once, without unpacking:
+    (a & b) + ((a ^ b) >> 1) with each byte's low bit masked off. b=None averages a with its upside-down copy."""
+    if b is None:
+        b = a[::-1]
+    return (a & b) + (((a ^ b) & np.uint32(0xFEFEFEFE)) >> np.uint32(1))
 
 
 class MilkEffect(Effect):

@@ -298,3 +298,39 @@ def test_config_migrations():
     assert c.rg_mode == "off" and c.eq_user_presets["old"] == {"bands": 10, "gains": [1] * 10}
     p.write_text(json.dumps({"replaygain": True, "eq_bands": 31}))
     c = Config.load(p); assert c.rg_mode == "track" and len(c.eq_gains) == 31
+
+
+@pytest.mark.skipif(not GST_OK, reason="GStreamer needed")
+def test_analyser_results_wait_until_their_audio_is_heard():
+    """The analysers run before the sound card's buffer (over a second of it on some setups): their results are held
+    until the pipeline clock reaches each message's end time, so the visualizers are in step with the sound."""
+    from types import SimpleNamespace
+    S = Gst.SECOND // 1000
+    vals = ", ".join("(float)-20.0" for _ in range(4))
+
+    def msg(end):
+        st = Gst.Structure.new_from_string(f"spectrum, endtime=(guint64){end}, magnitude=(float){{ {vals} }}")
+        return Gst.Message.new_element(None, st)
+
+    class Clock:
+        t = 0
+        def get_time(self): return self.t
+    clock = Clock()
+    pipe = SimpleNamespace(get_clock=lambda: clock, get_base_time=lambda: 0)
+    cur, other = SimpleNamespace(pipe=pipe), SimpleNamespace(pipe=pipe)
+    eng = SimpleNamespace(_state=audio.PS.PlayingState, _vis_q=[])
+    due = lambda: audio.GstEngine._due_vis(eng, cur)
+    eng._vis_q = [(cur, e * S, "spectrum", msg(e * S)) for e in (100, 500, 1200)] + [(other, 50 * S, "spectrum", msg(50 * S))]
+    clock.t = 90 * S
+    mags, lv = due()
+    assert mags == [-20.0] * 4 and lv is None                 # the 100 ms one is due (10 ms early is fine)
+    assert [e[1] // S for e in eng._vis_q] == [500, 1200]     # later ones wait; the other deck's are dropped
+    clock.t = 400 * S
+    assert due() == (None, None) and len(eng._vis_q) == 2
+    clock.t = 1300 * S
+    assert due()[0] is not None and eng._vis_q == []
+    eng._vis_q = [(cur, 9000 * S, "spectrum", msg(9000 * S))]  # impossible (stale after a seek): dropped, not shown
+    assert due() == (None, None) and eng._vis_q == []
+    eng._state = audio.PS.PausedState                          # no running clock: passed on at once, as before
+    eng._vis_q = [(cur, 5000 * S, "spectrum", msg(5000 * S))]
+    assert due()[0] is not None

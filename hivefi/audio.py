@@ -340,6 +340,7 @@ class GstEngine(QObject):
         self._duration = 0
         self._last_pos = -1
         self._was_paused = False
+        self._vis_q: list = []                 # analyser messages waiting until their audio is heard (see _due_vis)
         self.cur.build(cfg)
         self._timer = QTimer(self, interval=40, timeout=self._poll)
         self._ramp_timer = QTimer(self, interval=20, timeout=self._ramp_tick)
@@ -390,6 +391,7 @@ class GstEngine(QObject):
     def stop(self):
         self._hard_stop_all()
         self._timer.stop()
+        self._vis_q = []
         self._set_state(PS.StoppedState)
         self.positionChanged.emit(0)
 
@@ -409,6 +411,7 @@ class GstEngine(QObject):
             self._pending_seek = int(ms)
             return
         flags = Gst.SeekFlags.FLUSH | (Gst.SeekFlags.ACCURATE if self.cfg.seek_accurate else Gst.SeekFlags.KEY_UNIT)
+        self._vis_q = []                       # their timestamps belong to the old position
         if not self.cur.pipe.seek_simple(Gst.Format.TIME, flags, int(ms) * Gst.MSECOND):
             self._pending_seek = int(ms)
 
@@ -588,6 +591,37 @@ class GstEngine(QObject):
     def _reset_tracking(self):
         self._duration = 0
         self._last_pos = -1
+        self._vis_q = []
+
+    def _due_vis(self, cur):
+        """The newest spectrum and level whose audio is being heard now.
+
+        The analysers sit before the sound card's buffer, so their results arrive ~100-180 ms before that audio comes
+        out of the speakers and the visualizers ran visibly ahead of the beat. Each message carries the running time at
+        which its audio ends; it is held until the pipeline clock gets there. Only the newest due message of each kind
+        is parsed. Without a clock (or while not playing) everything is passed on at once, as before."""
+        q = self._vis_q
+        if not q:
+            return None, None
+        now = None
+        clock = cur.pipe.get_clock() if self._state == PS.PlayingState else None
+        if clock is not None:
+            now = clock.get_time() - cur.pipe.get_base_time()
+        due, keep = [], []
+        for e in q:
+            deck, end, _name, _m = e
+            if deck is not cur:
+                continue                                       # from the other deck (crossfade / gapless switch)
+            if now is None or not end or end <= now + 10 * Gst.MSECOND:
+                due.append(e)
+            elif end - now < 2 * Gst.SECOND:
+                keep.append(e)
+            # anything further ahead cannot be real (a stale timestamp after a seek or a restart): dropped
+        self._vis_q = keep[-120:]
+        spec = next((m for _d, _e, n, m in reversed(due) if n == "spectrum"), None)
+        lvl = next((m for _d, _e, n, m in reversed(due) if n == "level"), None)
+        return (parse_vis(spec.get_structure())[1] if spec is not None else None,
+                parse_vis(lvl.get_structure())[1] if lvl is not None else None)
 
     def _set_state(self, st):
         if st != self._state:
@@ -622,9 +656,12 @@ class GstEngine(QObject):
                     title = name
                 continue
             if t == Gst.MessageType.ELEMENT:
-                kind, val = parse_vis(m.get_structure())
-                if kind == "spectrum": mags = val
-                elif kind == "level": lv = val
+                st = m.get_structure()
+                name = st.get_name() if st is not None else None
+                if name in ("spectrum", "level"):
+                    ok, end = st.get_uint64("endtime")
+                    # the message is kept, not its structure: a structure is owned by its message and dies with it
+                    self._vis_q.append((cur, end if ok else 0, name, m))
                 continue
             if t == Gst.MessageType.EOS:
                 cur.pipe.set_state(Gst.State.NULL)
@@ -655,6 +692,7 @@ class GstEngine(QObject):
                     cur.pipe.seek_simple(Gst.Format.TIME, flags, ms * Gst.MSECOND)
         if title:
             self.streamTitle.emit(title)
+        mags, lv = self._due_vis(cur)
         if mags is not None or lv is not None:
             self.visData.emit(mags, lv)
         if self._state != PS.PlayingState:

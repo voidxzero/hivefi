@@ -146,6 +146,7 @@ class PanelsMixin:
         fs.set_track(self.player.current)
         was_active = c.vis_active
         c.vis_active = True
+        self.vis.set_paused(True)                              # the panel behind it would keep drawing every frame
         self.player.configure(relook=False)                    # the analysers must be posting while it is shown
         def closed():
             try:
@@ -153,6 +154,7 @@ class PanelsMixin:
             except TypeError:
                 pass
             self.fs_vis = None
+            self.vis.set_paused(False)
             c.vis_active = bool(was_active or self.dock_vis.toggleViewAction().isChecked())
             self.player.configure(relook=False)
             c.save()
