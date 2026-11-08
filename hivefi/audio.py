@@ -355,6 +355,7 @@ class GstEngine(QObject):
             self._begin_crossfade(url, min(cfg.crossfade_ms, 4000), auto=False)
             return
         self._hard_stop_all()
+        self._vis_q = []                       # the sink is flushed: nothing queued will be heard
         self._prepare(self.cur)
         self.cur.uri = url.toString()
         self.cur.pipe.set_property("uri", self.cur.uri)
@@ -591,20 +592,22 @@ class GstEngine(QObject):
     def _reset_tracking(self):
         self._duration = 0
         self._last_pos = -1
-        self._vis_q = []
 
     def _due_vis(self, cur):
         """The newest spectrum and level whose audio is being heard now.
 
-        The analysers sit before the sound card's buffer, so their results arrive ~100-180 ms before that audio comes
-        out of the speakers and the visualizers ran visibly ahead of the beat. Each message carries the running time at
-        which its audio ends; it is held until the pipeline clock gets there. Only the newest due message of each kind
-        is parsed. Without a clock (or while not playing) everything is passed on at once, as before."""
+        The analysers sit before the sound card's buffer, so their results arrive before that audio comes out of the
+        speakers (0.1-0.2 s with a small buffer, 1.0-1.3 s measured with a PipeWire default) and the visualizers ran
+        ahead of the beat. Each message carries the running time at which its audio ends; it is held until the pipeline
+        clock gets there. Only the newest due message of each kind is parsed. While paused nothing is released or
+        dropped (the sound card keeps its buffer, and so does this); without a clock everything is passed on at once,
+        as before. A gapless change to the next track keeps the queue: the end of the previous song is still in the
+        buffer and the running time carries on."""
         q = self._vis_q
-        if not q:
+        if not q or self._state != PS.PlayingState:
             return None, None
         now = None
-        clock = cur.pipe.get_clock() if self._state == PS.PlayingState else None
+        clock = cur.pipe.get_clock()
         if clock is not None:
             now = clock.get_time() - cur.pipe.get_base_time()
         due, keep = [], []
@@ -614,10 +617,10 @@ class GstEngine(QObject):
                 continue                                       # from the other deck (crossfade / gapless switch)
             if now is None or not end or end <= now + 10 * Gst.MSECOND:
                 due.append(e)
-            elif end - now < 2 * Gst.SECOND:
+            elif end - now < 10 * Gst.SECOND:
                 keep.append(e)
             # anything further ahead cannot be real (a stale timestamp after a seek or a restart): dropped
-        self._vis_q = keep[-120:]
+        self._vis_q = keep[:1200]                              # (far more than any output buffer holds)
         spec = next((m for _d, _e, n, m in reversed(due) if n == "spectrum"), None)
         lvl = next((m for _d, _e, n, m in reversed(due) if n == "level"), None)
         return (parse_vis(spec.get_structure())[1] if spec is not None else None,

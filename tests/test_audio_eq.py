@@ -329,8 +329,12 @@ def test_analyser_results_wait_until_their_audio_is_heard():
     assert due() == (None, None) and len(eng._vis_q) == 2
     clock.t = 1300 * S
     assert due()[0] is not None and eng._vis_q == []
-    eng._vis_q = [(cur, 9000 * S, "spectrum", msg(9000 * S))]  # impossible (stale after a seek): dropped, not shown
+    eng._vis_q = [(cur, 20000 * S, "spectrum", msg(20000 * S))]  # impossible (stale after a seek): dropped, not shown
     assert due() == (None, None) and eng._vis_q == []
-    eng._state = audio.PS.PausedState                          # no running clock: passed on at once, as before
-    eng._vis_q = [(cur, 5000 * S, "spectrum", msg(5000 * S))]
+    eng._vis_q = [(cur, 4000 * S, "spectrum", msg(4000 * S))]    # a big output buffer (2.7 s ahead): still waits
+    assert due() == (None, None) and len(eng._vis_q) == 1
+    eng._state = audio.PS.PausedState                          # paused: the sink keeps its buffer, so does the queue
+    assert due() == (None, None) and len(eng._vis_q) == 1
+    eng._state = audio.PS.PlayingState
+    pipe.get_clock = lambda: None                              # no clock at all: passed on at once, as before
     assert due()[0] is not None
