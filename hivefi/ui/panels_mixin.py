@@ -188,8 +188,8 @@ class PanelsMixin:
     edit_mode = False                  # never persisted: the app always starts with the layout locked
 
     def _set_edit_mode(self, on):
-        """On: panels can be dragged, floated, tabbed, resized and closed. Off: nothing about the layout can change
-        (title bars are hidden, separators and splitters are dead, toolbars are fixed)."""
+        """On: panels can be dragged, floated, tabbed and closed. Off: they stay where they are (title bars hidden,
+        toolbars fixed). Resizing panels and splitters works either way."""
         was, self.edit_mode = self.edit_mode, bool(on)
         on = self.edit_mode
         if on and not was and not getattr(self, "_in_revert", False):
@@ -201,9 +201,6 @@ class PanelsMixin:
             d.setTitleBarWidget(None if on else QWidget())      # an empty widget hides the title bar
         for tb in self.toolbars:
             tb.setMovable(on)
-        for sp in (self.browser_split,):
-            for i in range(1, sp.count()):
-                sp.handle(i).setEnabled(on)
         for bar in self.findChildren(QTabBar):                  # tabs of stacked docks
             bar.setMovable(on)
         if hasattr(self, "edit_toolbar"):
@@ -307,13 +304,6 @@ class PanelsMixin:
     def _apply_edit_state(self):
         self._set_edit_mode(self.edit_mode)
 
-    def eventFilter(self, obj, ev):
-        """Dock separators are handled by the main window itself: while the layout is locked they must not react."""
-        if obj is self and not self.edit_mode and ev.type() in (
-                QEvent.Type.MouseButtonPress, QEvent.Type.MouseMove, QEvent.Type.MouseButtonRelease,
-                QEvent.Type.MouseButtonDblClick):
-            return True
-        return super().eventFilter(obj, ev)
 
     # ------------------------------------------------------------------ panel editor (Preferences → Panels)
     AREAS = {"Left": Qt.DockWidgetArea.LeftDockWidgetArea, "Right": Qt.DockWidgetArea.RightDockWidgetArea,

@@ -135,7 +135,6 @@ class MainWindow(PanelsMixin, QMainWindow):
         if cfg.header_state:
             self._restore_header(QByteArray.fromBase64(cfg.header_state.encode()))
             self._sorted_once = True
-        self.installEventFilter(self)
         self._set_edit_mode(False)                               # always starts locked; View → Edit Mode unlocks
         QTimer.singleShot(0, self._restore_splits)               # needs the window laid out at its final size
         self._start_autosave()
@@ -318,7 +317,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         self.status_lbl = QLabel(""); self.statusBar().addWidget(self.status_lbl, 1)
         self.sync_lbl = QLabel(""); self.statusBar().addPermanentWidget(self.sync_lbl)
         self.btn_edit = QPushButton("✎ Edit layout"); self.btn_edit.setCheckable(True); self.btn_edit.setFlat(True)
-        self.btn_edit.setToolTip("Unlock the layout to move, resize, float or close panels (Ctrl+Shift+E)")
+        self.btn_edit.setToolTip("Unlock the layout to move, float, tab or close panels (Ctrl+Shift+E); resizing always works")
         self.btn_edit.toggled.connect(self._set_edit_mode)
         self.statusBar().addPermanentWidget(self.btn_edit)
 

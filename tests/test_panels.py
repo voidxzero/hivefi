@@ -188,7 +188,7 @@ def test_panels_layout_and_lock(win):
     assert all(not tb.isMovable() for tb in w.toolbars) and w.dock_sources.titleBarWidget() is not None
     from PyQt6.QtWidgets import QDockWidget
     assert all(d.features() == QDockWidget.DockWidgetFeature.NoDockWidgetFeatures for d in w.findChildren(QDockWidget))
-    assert not w.browser_split.handle(1).isEnabled()
+    assert w.browser_split.handle(1).isEnabled()                       # resizing is always allowed
     w._set_edit_mode(True)
     # named layouts
     snap = w._layout_snapshot()
@@ -286,38 +286,28 @@ def _drag(w, x0, y, dx):
     wait(50)
 
 
-def test_edit_mode_locks_resizing(win):
+def test_panels_resize_whether_or_not_edit_mode_is_on(win):
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QDockWidget
     w = win
     w.show(); w.resize(1200, 700); w.dock_sources.show(); wait(300)
-    assert not w.edit_mode and not w.act_edit.isChecked() and not w.btn_edit.isChecked()
-    # locked: dragging the separator next to the Sources panel does nothing
-    r = w.dock_sources.geometry()
-    x, y = r.right() + 2, r.center().y()
-    before = w.dock_sources.width()
-    _drag(w, x, y, 90)
-    assert w.dock_sources.width() == before
-    # the splitters are dead too
-    h = w.browser_split.handle(1); sizes = w.browser_split.sizes()
-    from PyQt6.QtTest import QTest
-    QTest.mousePress(h, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(1, 5))
-    QTest.mouseMove(h, QPoint(60, 5)); QTest.mouseRelease(h, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(60, 5))
-    wait(50)
-    assert w.browser_split.sizes() == sizes
-    # edit mode on (menu action, status-bar button and shortcut share one state): the same drag resizes the panel
-    w.act_edit.setChecked(True)
-    assert w.edit_mode and w.btn_edit.isChecked() and "Editing" in w.btn_edit.text()
-    r = w.dock_sources.geometry(); x, y = r.right() + 2, r.center().y()
-    before = w.dock_sources.width()
-    _drag(w, x, y, 90)
-    assert w.dock_sources.width() > before + 40
-    # and off again locks it again
-    w.btn_edit.setChecked(False)
-    assert not w.edit_mode and not w.act_edit.isChecked()
-    r = w.dock_sources.geometry(); x, y = r.right() + 2, r.center().y()
-    before = w.dock_sources.width()
-    _drag(w, x, y, -60)
-    assert w.dock_sources.width() == before
-    # layouts keep the lock: applying one while locked leaves it locked
+    for edit in (False, True, False):
+        w._set_edit_mode(edit); wait(100)
+        assert w.edit_mode == edit
+        r = w.dock_sources.geometry(); before = w.dock_sources.width()
+        _drag(w, r.right() + 2, r.center().y(), 60)
+        assert w.dock_sources.width() > before + 30, (edit, before, w.dock_sources.width())     # the separator works
+        r = w.dock_sources.geometry(); before = w.dock_sources.width()
+        _drag(w, r.right() + 2, r.center().y(), -60)
+        assert w.dock_sources.width() < before - 30
+        h = w.browser_split.handle(1); sizes = w.browser_split.sizes()
+        QTest.mousePress(h, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(1, 5))
+        QTest.mouseMove(h, QPoint(60, 5)); QTest.mouseRelease(h, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(60, 5))
+        wait(50)
+        assert w.browser_split.sizes() != sizes                                                  # and so do the splitters
+    # locked still means panels cannot be moved, floated or closed and toolbars stay put
+    assert all(d.features() == QDockWidget.DockWidgetFeature.NoDockWidgetFeatures for d in w.findChildren(QDockWidget))
+    assert w.dock_sources.titleBarWidget() is not None and not any(tb.isMovable() for tb in w.toolbars)
     w._apply_builtin_layout("Everything")
     assert w.dock_sources.titleBarWidget() is not None
 
