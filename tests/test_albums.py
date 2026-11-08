@@ -169,3 +169,62 @@ def test_grid_and_browser_use_the_same_albums(tmp_path):
     assert [t["id"] for t in m.tracks] == [4]
     m.set_filters(text="hits")                                                # any other filter clears "one album"
     assert m.ids is None and len(m.tracks) == 3
+
+
+def R(i, **kw):
+    """A server track synced before album ids were stored (no album_id, no path)."""
+    return T(i, source="remote", path=None, **kw)
+
+
+def test_server_tracks_without_album_id_do_not_merge_different_artists():
+    ts = [R(1, album="Trilogy", artist="ATB", album_artist="ATB"),
+          R(2, album="Trilogy", artist="Carpenter Brut", album_artist="Carpenter Brut"),
+          R(3, album="Trilogy", artist="ATB", album_artist="ATB")]
+    g = groups(ts)
+    assert len(g) == 2 and sorted(len(v) for v in g.values()) == [1, 2]
+
+
+def test_server_tracks_without_album_id_join_their_local_twins_album():
+    """An untagged local compilation is one album (its folder); the server reports each track's artist as album
+    artist, which alone would split it per artist. The server copies follow their local twins instead."""
+    loc = [T(1, album="Comp", artist="X", album_artist="X", title="a", path="/m/comp/1.mp3"),
+           T(2, album="Comp", artist="Y", album_artist="Y", title="b", path="/m/comp/2.mp3")]
+    rem = [R(11, album="Comp", artist="X", album_artist="X", title="a", track_no=1),
+           R(12, album="Comp", artist="Y", album_artist="Y", title="b", track_no=2)]
+    g = groups(loc + rem)
+    assert len(g) == 1 and {t["_aa"] for t in loc + rem} == {albums.VARIOUS}
+
+
+def test_guest_artists_stay_with_the_lead_artist():
+    ts = [R(1, album="Platinum", artist="Severina", album_artist="Severina"),
+          R(2, album="Platinum", artist="Severina & Boris", album_artist="Severina & Boris"),
+          R(3, album="Platinum", artist="Severina feat. X", album_artist="Severina feat. X")]
+    g = groups(ts)
+    assert len(g) == 1 and {t["_aa"] for t in ts} == {"Severina"}
+    assert albums.main_artist("Simon, Garfunkel") == "simon" and albums.main_artist("Severina") == "severina"
+
+
+def test_copies_of_an_album_are_one_album_with_every_copy():
+    m4a = [T(i, album="Ambient", artist="Moby", album_artist="Moby", path=f"/m/marko/Ambient/{i}.m4a") for i in (1, 2)]
+    mp3 = [T(i + 10, album="Ambient", artist="Moby", album_artist="Moby", path=f"/m/mine/Ambient/{i}.mp3", track_no=i)
+           for i in (1, 2)]
+    srv = [R(20 + i, album="Ambient", artist="Moby", album_artist="Moby", album_id=f"al-{k}", title=f"s{i}")
+           for k in (1, 2) for i in (1, 2)]
+    g = groups(m4a + mp3 + srv)
+    assert len(g) == 1 and len(next(iter(g.values()))) == 8
+    assert next(iter(g))[0] == "l"                            # the local album is the one kept
+
+
+def test_unknown_album_groups_are_never_merged():
+    ts = [T(1, album="", artist="Unknown Artist", path="/m/a/1.mp3"),
+          T(2, album="", artist="Unknown Artist", path="/m/b/2.mp3")]
+    assert len(groups(ts)) == 2
+
+
+def test_disc_suffixes_without_brackets_meet():
+    for a, b in (("Alive 2007 CD1", "Alive 2007 CD2"), ("Music Bank Disc 1", "Music Bank Disc 3"),
+                 ("Garage Inc Cd 1", "Garage Inc Cd 2"), ("Hits (Golden Edition CD1)", "Hits (Golden Edition CD2)")):
+        assert albums.norm_album(a) == albums.norm_album(b), (a, b)
+    assert albums.norm_album("Hits (Golden Edition CD2)") == "hits (golden edition)"
+    assert albums.norm_album("Disc 1") == "disc 1"             # nothing but a disc number: kept
+    assert albums.norm_album("1999") == "1999" and albums.norm_album("CD") == "cd"

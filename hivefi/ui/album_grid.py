@@ -17,12 +17,15 @@ class _Signals(QObject):
 
 
 class _Job(QRunnable):
-    def __init__(self, gen, key, track, api, sigs):
-        super().__init__(); self.gen, self.key, self.track, self.api, self.sigs = gen, key, track, api, sigs
+    def __init__(self, gen, key, tracks, api, sigs, current):
+        super().__init__()
+        self.gen, self.key, self.tracks, self.api, self.sigs, self.current = gen, key, tracks, api, sigs, current
 
     def run(self):
+        if self.current[0] != self.gen:                  # the grid was refilled meanwhile: skip the (slow) file reads
+            return
         try:
-            data = art.get_art(self.track, self.api, ICON * 2) or b""
+            data = art.album_art(self.tracks, self.api, ICON * 2) or b""
         except Exception:  # noqa: BLE001
             data = b""
         self.sigs.loaded.emit(self.gen, self.key, data)
@@ -47,6 +50,8 @@ class AlbumGrid(QListWidget):
         self.api_getter = api_getter
         self.albums: dict[str, list] = {}
         self._gen = 0
+        self._current = [0]                           # shared with the jobs, so stale ones can bail out early
+        self._prio = 0
         self._requested: set[str] = set()
         self._items: dict[str, QListWidgetItem] = {}
         self.setViewMode(QListView.ViewMode.IconMode)
@@ -69,7 +74,8 @@ class AlbumGrid(QListWidget):
         self.placeholder = _placeholder(c, border_color(self))
 
     def set_tracks(self, tracks):
-        self._gen += 1; self._requested.clear()
+        self._gen += 1; self._current[0] = self._gen; self._requested.clear()
+        self.pool.clear()                              # covers queued for the previous contents are not needed
         groups: dict[str, list] = {}
         for t in tracks:                               # albums = title + album artist (see hivefi.albums)
             groups.setdefault(t.get("_ak") or f"{t['album_artist'] or t['artist']}\x1f{t['album']}", []).append(t)
@@ -143,9 +149,9 @@ class AlbumGrid(QListWidget):
             if key in self._requested:
                 continue
             self._requested.add(key)
-            ts = self.albums[key]
-            rep = next((t for t in ts if t.get("cover_id")), ts[0]) if ts[0]["source"] == "remote" else ts[0]
-            self.pool.start(_Job(self._gen, key, rep, api, self.sigs))
+            # newest first: where the user stops scrolling gets its covers before the rows scrolled past
+            self._prio = min(self._prio + 1, 2 ** 30)
+            self.pool.start(_Job(self._gen, key, self.albums[key], api, self.sigs, self._current), self._prio)
 
     def _on_loaded(self, gen, key, data):
         if gen != self._gen or not data:

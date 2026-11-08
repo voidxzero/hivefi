@@ -124,3 +124,33 @@ def test_find_covers_for_albums(tmp_path):
         assert coverart.find_covers([dict(source="remote", album="Known Album", artist="A")], pause=0, mb=s.url, caa=s.url) == (0, [], [])
     finally:
         s.srv.shutdown()
+
+
+def test_cover_file_names():
+    from hivefi.art import _pick_image
+    assert _pick_image(["01.mp3", "Folder.jpg", "back.jpg"]) == "Folder.jpg"
+    assert _pick_image(["Metallica - 1984 - Ride - Back.jpg", "Metallica - 1984 - Ride - Front.jpg"]) == \
+        "Metallica - 1984 - Ride - Front.jpg"
+    assert _pick_image(["AlbumArtSmall.jpg", "AlbumArt_{43D2}_Large.jpg", "AlbumArt_{43D2}_Small.jpg"]) == \
+        "AlbumArt_{43D2}_Large.jpg"
+    assert _pick_image(["scan.png", "notes.txt"]) == "scan.png"            # the only image there is
+    assert _pick_image(["a.jpg", "b.jpg"]) is None                         # two unnamed pictures: no guess
+    assert _pick_image(["CD.jpg", "Back.jpg"]) is None                     # never the disc or the back
+
+
+def test_album_art_reads_other_tracks_and_disc_parent(tmp_path, monkeypatch):
+    from hivefi import art
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "c"))
+    alb = tmp_path / "Album"; (alb / "CD 1").mkdir(parents=True)
+    (alb / "cover.jpg").write_bytes(b"\xff\xd8\xffparent")
+    t = dict(source="local", path=str(alb / "CD 1" / "01.mp3"))
+    assert art.album_art([t]) == b"\xff\xd8\xffparent"                     # disc folder: cover one level up
+    calls = []
+    monkeypatch.setattr(art, "_embedded", lambda p: calls.append(p) or (b"emb" if p.endswith("02.mp3") else None))
+    other = tmp_path / "Other"; other.mkdir()
+    ts = [dict(source="local", path=str(other / f"0{i}.mp3")) for i in (1, 2, 3)]
+    assert art.album_art(ts) == b"emb"                                     # the picture is on track 2 only
+    nothing = tmp_path / "Bare"; nothing.mkdir()
+    bare = [dict(source="local", path=str(nothing / f"x{i}.mp3")) for i in (1, 2)]
+    assert art.album_art(bare) is None
+    n = len(calls); assert art.album_art(bare) is None and len(calls) == n  # remembered: no second round of reads
