@@ -282,6 +282,10 @@ class SettingsDialog(QDialog):
         lbrow = QHBoxLayout(); lbrow.addWidget(self.lb_token, 1); lbrow.addWidget(lb_test)
         gl.addWidget(QLabel("Scrobble plays to ListenBrainz (listenbrainz.org → Settings → User token):"))
         gl.addLayout(lbrow); gl.addWidget(self.lb_url); gl.addWidget(self.lb_status)
+        self.articles = QLineEdit(", ".join(cfg.ignore_articles))
+        self.articles.setToolTip("Artists and albums sort without these leading words: 'The Beatles' is filed under B")
+        gl.addWidget(QLabel("Ignore these leading words when sorting artists and albums (comma separated):"))
+        gl.addWidget(self.articles)
         self.ly_online = QCheckBox("Look up lyrics online (LRCLIB) when a track has none")
         self.ly_online.setToolTip("Sends the artist, title, album and length to lrclib.net")
         self.ly_online.setChecked(cfg.lyrics_online)
@@ -395,6 +399,7 @@ class SettingsDialog(QDialog):
         c.server_folders, names = self.chosen_server_folders()
         if names:
             c.server_folder_names = names
+        c.ignore_articles = [w.strip() for w in self.articles.text().split(",") if w.strip()]
         c.watch_folders, c.inbox_dir = self.watch.isChecked(), self.inbox.text().strip()
         c.inbox_target, c.inbox_pattern = self.inbox_target.currentText().strip(), self.inbox_pattern.text().strip() or c.inbox_pattern
         c.lyrics_online, c.lyrics_save_sidecar = self.ly_online.isChecked(), self.ly_save.isChecked()

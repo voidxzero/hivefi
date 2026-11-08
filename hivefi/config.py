@@ -119,6 +119,7 @@ class Config:
     inbox_target: str = ""               # library folder the inbox files go to (default: the first enabled one)
     inbox_pattern: str = "%albumartist%/%album%/%disc%%track% - %title%"
     podcast_dir: str = ""                # where downloaded episodes go (empty = the app's data folder)
+    ignore_articles: list = field(default_factory=lambda: ["the"])   # leading words ignored when sorting artists/albums
     check_updates: bool = True           # look for a newer version on GitHub at startup
     github_token: str = ""               # optional; needed to update from a private repo (else `gh auth token`)
 

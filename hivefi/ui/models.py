@@ -5,6 +5,7 @@ from PyQt6.QtCore import QAbstractTableModel, QMimeData, QModelIndex, Qt
 from PyQt6.QtGui import QBrush, QColor
 
 from ..searchquery import Query
+from ..sortkey import sort_name
 
 MIME = "application/x-hivefi-tracks"
 
@@ -34,7 +35,10 @@ _FLAGS = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.
 def _sort_key(col_key, playing_id):
     """Key function for sorting track dicts by a column (artist/album keep albums in track order)."""
     if col_key in ("artist", "album"):
-        return lambda t: ((t[col_key] or "").lower(), (t["album"] or "").lower(), t["disc_no"] or 0, t["track_no"] or 0)
+        return lambda t: (sort_name(t[col_key]), sort_name(t["album"]), t["disc_no"] or 0, t["track_no"] or 0)
+    if col_key == "album_artist":
+        return lambda t: (sort_name(t.get("album_artist") or t.get("artist")), sort_name(t["album"]), t["disc_no"] or 0,
+                          t["track_no"] or 0)
     if col_key == "_state":
         return lambda t: t["id"] == playing_id
     return lambda t: (lambda v: v.lower() if isinstance(v, str) else (v or 0))(t.get(col_key))

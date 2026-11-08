@@ -19,7 +19,7 @@ from ..db import Database
 from ..mpris import Mpris
 from ..player import Player
 from ..subsonic import Subsonic, SubsonicError
-from .. import art, convert, coverart, devicesync, inbox as inbox_mod, podcasts, folders, stats as libstats, libexport, listenbrainz, lyrics, radio, tagtools, organizer, rgscan, skins, smart, tagedit, updater
+from .. import art, convert, coverart, devicesync, inbox as inbox_mod, podcasts, sortkey, folders, stats as libstats, libexport, listenbrainz, lyrics, radio, tagtools, organizer, rgscan, skins, smart, tagedit, updater
 from .album_grid import AlbumGrid
 from .dialogs import TagDialog
 from .audio_dialog import AudioDialog
@@ -102,6 +102,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         self.player.set_volume(cfg.volume)
         self.player.shuffle, self.player.repeat = cfg.shuffle, cfg.repeat
         self.player.auto_dj = self._auto_dj_tracks if cfg.auto_dj else None
+        sortkey.set_articles(cfg.ignore_articles)
         self.skin_tokens = skins.all_skins().get(cfg.skin) or skins.BUILTIN[skins.DEFAULT]
         self._quitting = False
         self.restart_requested = False
@@ -733,7 +734,7 @@ class MainWindow(PanelsMixin, QMainWindow):
             else: vals = {t["album"] for t in rows}
             vals.discard("")
             lw.addItem(f"{ALL} ({len(vals)})")
-            lw.addItems(sorted(vals, key=str.lower)); lw.setCurrentRow(0)
+            lw.addItems(sorted(vals, key=str.lower if lv == "genre" else sortkey.sort_name)); lw.setCurrentRow(0)
             lw.setUpdatesEnabled(True); lw.blockSignals(False)
 
     def _restore_browser(self, saved):
@@ -1848,6 +1849,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         if dlg.exec():
             dlg.apply(); self._rebuild_api(); self._apply_sync_timer()
             self.player.configure(); self._update_vis_availability(); self._setup_watch()
+            sortkey.set_articles(self.cfg.ignore_articles); self.load_source(keep=True)
             self._after_library_change()
             self.scan_library(quiet=True)
             if self.api: self.sync_now(silent=True)

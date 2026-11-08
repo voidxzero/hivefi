@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import QAbstractItemView, QListView, QListWidget, QListWidg
 
 from .. import art
 from ..albums import title_of
+from ..sortkey import sort_name
 from .panels import BORDER, border_color, with_border
 
 ICON = 150
@@ -75,7 +76,7 @@ class AlbumGrid(QListWidget):
         self.blockSignals(True); self.clear(); self.albums = {}; self._items = {}
         named = [(key, ts, title_of(ts), ts[0].get("_aa") or ts[0]["album_artist"] or ts[0]["artist"])
                  for key, ts in groups.items()]
-        for key, ts, album, artist in sorted(named, key=lambda g: (g[3].lower(), g[2].lower())):
+        for key, ts, album, artist in sorted(named, key=lambda g: (sort_name(g[3]), sort_name(g[2]))):
             self.albums[key] = ts                      # track order is sorted on demand (album_tracks)
             it = QListWidgetItem(self.placeholder, f"{album}\n{artist}")
             it.setData(KEY, key)
