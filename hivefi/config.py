@@ -98,6 +98,9 @@ class Config:
     vis_enabled: bool = True             # put spectrum/level analysers in the audio chain (about 1% CPU)
     vis_active: bool = False             # runtime only: a visualizer panel is visible
     vis_bars: int = 48
+    vis_full_effect: str = "auto"        # fullscreen visualizer: effect name, or 'auto' to cycle through all
+    vis_full_cycle: int = 30             # seconds per effect in auto mode (0 = stay)
+    vis_full_quality: str = "medium"     # low | medium | high: resolution of the feedback effects
     vis_colors: str = "skin"             # colour scheme name (see ui/visualizer.SCHEMES)
     vis_custom: list = field(default_factory=lambda: ["#7a1fd8", "#ff4fb8", "#ffe14a"])   # custom low/mid/peak
     vis_peaks: bool = True

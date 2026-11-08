@@ -354,6 +354,9 @@ class MainWindow(PanelsMixin, QMainWindow):
             a = vm.addAction(label); a.setCheckable(True); a.setChecked(key == self.cfg.vis_style); vg.addAction(a)
             a.triggered.connect(lambda _c, k=key: self._set_vis_style(k))
         vm.addSeparator()
+        vm.addAction("Fullscreen Visualizer", QKeySequence("F8"), self.open_fullscreen_vis)
+        fm = vm.addMenu("Fullscreen Effect"); fm.aboutToShow.connect(lambda: self._fill_fullscreen_menu(fm))
+        vm.addSeparator()
         cm = vm.addMenu("Colors"); cm.aboutToShow.connect(lambda: self.vis.fill_colors_menu(cm))
         vm.addAction("Show Visualizer", self.dock_vis.show)
         v.addAction("Columns View", lambda: self._set_view_mode("browser"))
@@ -1287,6 +1290,38 @@ class MainWindow(PanelsMixin, QMainWindow):
         for key, a in self.shortcut_actions.items():
             seq = self.cfg.shortcuts.get(key, self.shortcut_defaults[key])
             a.setShortcut(QKeySequence(seq) if seq else QKeySequence())
+
+    def _fill_fullscreen_menu(self, menu):
+        """Effect choice, automatic cycling and quality of the full-screen visualizer."""
+        from .. import vizfx
+        menu.clear(); c = self.cfg
+        g = QActionGroup(menu)
+        a = menu.addAction("Auto (cycle through all)"); a.setCheckable(True); a.setChecked(c.vis_full_effect == "auto")
+        g.addAction(a); a.triggered.connect(lambda: self._set_full("vis_full_effect", "auto"))
+        menu.addSeparator()
+        for e in vizfx.effect_classes():                        # ◈ = MilkDrop-style feedback, ▮ = classic
+            act = menu.addAction(("◈ " if e.family == "milkdrop" else "▮ ") + e.name)
+            act.setCheckable(True); act.setChecked(c.vis_full_effect == e.name); g.addAction(act)
+            act.triggered.connect(lambda _c, n=e.name: self._set_full("vis_full_effect", n))
+        menu.addSeparator()
+        sm = menu.addMenu("Change effect every"); sg = QActionGroup(sm)
+        for secs in (0, 15, 30, 60, 120):
+            act = sm.addAction("never" if secs == 0 else f"{secs} seconds"); act.setCheckable(True)
+            act.setChecked(c.vis_full_cycle == secs); sg.addAction(act)
+            act.triggered.connect(lambda _c, s=secs: self._set_full("vis_full_cycle", s))
+        qm = menu.addMenu("Quality"); qg = QActionGroup(qm)
+        for q in ("low", "medium", "high"):
+            act = qm.addAction(q.capitalize()); act.setCheckable(True); act.setChecked(c.vis_full_quality == q)
+            qg.addAction(act); act.triggered.connect(lambda _c, q=q: self._set_full("vis_full_quality", q))
+
+    def _set_full(self, key, value):
+        setattr(self.cfg, key, value)
+        fs = getattr(self, "fs_vis", None)
+        if fs is not None:
+            if key == "vis_full_effect":
+                (fs.set_auto(True) if value == "auto" else fs.select(value, remember=False))
+            elif key == "vis_full_cycle":
+                fs.cycle = value
 
     def _import_skin(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import skin", "", "Skins (*.json)")

@@ -116,6 +116,7 @@ class PanelsMixin:
         self.vis.styleChanged.connect(self._set_vis_style)
         self.vis.optionsChanged.connect(self._vis_options)
         self.vis.colorsChanged.connect(self._set_vis_colors)
+        self.vis.fullscreenRequested.connect(self.open_fullscreen_vis)
         self.dock_vis.visibilityChanged.connect(self._vis_visible)
         self.player.mp.visData.connect(self.vis.feed)
         self._update_vis_availability()
@@ -123,6 +124,37 @@ class PanelsMixin:
     def _set_vis_style(self, name):
         self.cfg.vis_style = name
         self.vis.set_style(name)
+
+    def open_fullscreen_vis(self, _checked=False):
+        """The full-screen visualizer: MilkDrop-style feedback effects and classic media-player effects."""
+        from .viz_fullscreen import FullscreenVisualizer
+        if getattr(self, "fs_vis", None) is not None:
+            self.fs_vis.activateWindow(); return self.fs_vis
+        c, mp = self.cfg, self.player.mp
+        if mp.engine != "gst" or not c.vis_enabled or c.bit_perfect:
+            self.statusBar().showMessage("The visualizer needs the GStreamer engine with the analysers on and "
+                                         "bit-perfect mode off.", 8000)
+            return None
+        fs = self.fs_vis = FullscreenVisualizer(c, self)
+        mp.visData.connect(fs.feed)
+        self.player.trackChanged.connect(fs.set_track)
+        fs.set_track(self.player.current)
+        was_active = c.vis_active
+        c.vis_active = True
+        self.player.configure(relook=False)                    # the analysers must be posting while it is shown
+        def closed():
+            try:
+                mp.visData.disconnect(fs.feed); self.player.trackChanged.disconnect(fs.set_track)
+            except TypeError:
+                pass
+            self.fs_vis = None
+            c.vis_active = bool(was_active or self.dock_vis.toggleViewAction().isChecked())
+            self.player.configure(relook=False)
+            c.save()
+            fs.deleteLater()
+        fs.closed.connect(closed)
+        fs.start()
+        return fs
 
     def _set_vis_colors(self, scheme, custom):
         self.cfg.vis_colors, self.cfg.vis_custom = scheme, list(custom)

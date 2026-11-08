@@ -3,7 +3,7 @@ name = "hivefi"
 version = "0.1.0"
 description = "Music manager and player for Linux with Navidrome/Subsonic sync"
 requires-python = ">=3.10"
-dependencies = ["PyQt6", "mutagen", "requests"]
+dependencies = ["PyQt6", "mutagen", "requests", "numpy"]
 
 [project.scripts]
 hivefi = "hivefi.ui.main_window:main"

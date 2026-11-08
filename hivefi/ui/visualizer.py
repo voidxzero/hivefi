@@ -52,6 +52,7 @@ class VisualizerPanel(QWidget):
     styleChanged = pyqtSignal(str)
     optionsChanged = pyqtSignal()
     colorsChanged = pyqtSignal(str, list)      # scheme name, custom colours (low, mid, peak)
+    fullscreenRequested = pyqtSignal()
     activeChanged = pyqtSignal(bool)           # needs data now (visible)?
 
     def __init__(self, style="bars", bars=48, peaks=True, scheme="skin", custom=None):
@@ -341,8 +342,13 @@ class VisualizerPanel(QWidget):
             picked.append(c.name())
         self.colorsChanged.emit("custom", picked)
 
+    def mouseDoubleClickEvent(self, e):
+        self.fullscreenRequested.emit()
+
     def _menu(self, pos):
         m = QMenu(self)
+        m.addAction("Fullscreen visualizer (F8)", self.fullscreenRequested.emit)
+        m.addSeparator()
         for key, label in STYLES.items():
             a = m.addAction(label); a.setCheckable(True); a.setChecked(key == self.style_name)
             a.triggered.connect(lambda _c, k=key: self.styleChanged.emit(k))

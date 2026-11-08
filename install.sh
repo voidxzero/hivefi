@@ -7,12 +7,12 @@ cd "$(dirname "$0")"
 . /etc/os-release 2>/dev/null || true
 case " $ID $ID_LIKE " in
   *" arch "*)
-    PKGS="python python-pyqt6 python-mutagen python-requests python-gobject gst-python gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav qt6-multimedia-ffmpeg"
+    PKGS="python python-pyqt6 python-numpy python-mutagen python-requests python-gobject gst-python gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav qt6-multimedia-ffmpeg"
     CMD="sudo pacman -S --needed $PKGS" ;;
   *" fedora "*)
-    CMD="sudo dnf install python3-pyqt6 python3-mutagen python3-requests python3-gobject gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free gstreamer1-plugin-libav" ;;
+    CMD="sudo dnf install python3-pyqt6 python3-numpy python3-mutagen python3-requests python3-gobject gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free gstreamer1-plugin-libav" ;;
   *" debian "*|*" ubuntu "*)
-    CMD="sudo apt install python3-pyqt6 python3-pyqt6.qtmultimedia python3-mutagen python3-requests python3-gi gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav" ;;
+    CMD="sudo apt install python3-pyqt6 python3-pyqt6.qtmultimedia python3-numpy python3-mutagen python3-requests python3-gi gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav" ;;
   *) CMD="" ;;
 esac
 
