@@ -38,6 +38,7 @@ Work on the selected local tracks (or the whole local library when nothing is se
 - **MilkDrop-style feedback effects** (need numpy): Tunnel Vision, Spiral Galaxy, Liquid Gold, Neon Rain, Kaleido Pulse, Deep Sea, Fireworks and Echo Chamber. Every frame the previous picture is zoomed, rotated, rippled, faded and colour-shifted (like MilkDrop's warp mesh) and new shapes driven by the music's bass, mids, treble and beats are drawn on top, so the trails melt into each other. These are original effects built on that idea, not MilkDrop preset files (projectM's presets cannot be loaded).
 - **Classic media-player style effects:** Bars (with falling peak caps), Scope, Ambience, Battery, Particles, Spikes and Starfield.
 - **Controls:** ← / → change effect, Space toggles automatic cycling, ↑ / ↓ change the cycle time, O shows or hides the title overlay, Esc or double-click leaves (the cursor hides itself). View → Visualizer Style → Fullscreen Effect picks the effect (or Auto), how often it changes, and the quality (320 / 480 / 720 px internal resolution for the feedback effects).
+- Choosing another effect always starts from a clean screen (no trails, particles or rings of the previous one), and an effect that ever fails is reported in the status bar and skipped instead of closing the program.
 - The analysers deliver the spectrum and levels, not raw samples, so the "Scope" trace is reconstructed from the spectrum rather than being the true waveform. Needs the GStreamer engine with the analysers on (not bit-perfect mode).
 
 ## More tools

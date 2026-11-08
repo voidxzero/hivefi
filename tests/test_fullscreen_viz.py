@@ -174,3 +174,133 @@ def test_integration_with_the_window(win):
     w.dock_vis.show(); wait(100)
     fs2 = w.open_fullscreen_vis(); wait(200); fs2.close(); wait(200)
     assert w.cfg.vis_active
+
+
+@pytest.mark.skipif(np is None, reason="numpy needed")
+def test_switching_effect_clears_the_screen():
+    from hivefi.ui.viz_fullscreen import FullscreenVisualizer
+    fs = FullscreenVisualizer(Config()); fs.resize(640, 360); fs.show()
+    def run(frames=60):
+        for _ in range(frames):
+            fs.audio.feed([-12.0] * 512, {"rms": [-12, -12], "peak": [-3, -3]}); fs.audio.update(0.033); fs.grab()
+    fs.select("Tunnel Vision"); run()
+    assert fs._fb is not None and fs._fb.buf[..., :3].max() > 40                       # the feedback buffer is full of picture
+    fs.select("Spiral Galaxy")                                                         # another feedback effect
+    assert fs._fb.buf[..., :3].max() == 0                                              # ... starts from black, not a faded echo
+    run(); assert fs._fb.buf[..., :3].max() > 40
+    fs.select("Bars"); fs.select("Tunnel Vision")                                      # via a classic one and back
+    assert fs._fb.buf[..., :3].max() == 0
+    # classic effects forget their particles / rings / sparks / stars when they are chosen again
+    fs.select("Particles"); run()
+    assert fs.effect.ps
+    fs.select("Battery"); run(); assert fs.effect.rings
+    fs.select("Particles"); assert fs.effect.ps == []
+    fs.select("Battery"); assert fs.effect.rings == []
+    fs.select("Fireworks")
+    for i in range(90):                                                                # a kick every 15 frames makes beats
+        mags = [-80.0] * 512
+        if i % 15 == 0:
+            mags[:40] = [-8.0] * 40
+        fs.audio.feed(mags, {"rms": [-15, -15], "peak": [-4, -4]}); fs.audio.update(0.033); fs.grab()
+    assert fs.effect.sparks
+    fs.next_effect(1); fs.next_effect(-1); assert fs.effect.name == "Fireworks" and fs.effect.sparks == []
+    # automatic cycling clears too
+    fs.set_auto(True, 5); fs.select("Tunnel Vision"); fs.set_auto(True, 5); run()
+    fs._since_switch = 6; fs._tick()
+    assert fs._fb.buf[..., :3].max() == 0 or fs.effect.family != "milkdrop"
+    names = fs.names(); fs.select(names[0]); assert len(fs.effects) == len(names)       # the list itself is unchanged
+    fs.close()
+
+
+def test_hostile_numbers_never_reach_the_painters():
+    """NaN / infinite / absurd values from the analysers or a zero-sized window used to raise inside the effects."""
+    nan, inf = float("nan"), float("inf")
+    a = vizfx.Audio()
+    a.feed([nan, inf, -inf] * 170 + [0.0, 1e30], {"rms": [nan, inf], "peak": [nan, nan]}); a.update(nan)
+    assert all(0.0 <= v <= 1.0 for v in a.raw) and 0.0 <= a.level <= 1.0 and a.dt == 0.033
+    for dt in (nan, inf, -5.0, 1e9, 0.0):
+        a.update(dt); assert 0.0 <= a.dt <= 0.25 and a.t == a.t and abs(a.t) < 1e6
+    assert vizfx.hsv(nan, nan, nan, nan).isValid() and vizfx.hsv(inf, -inf, inf, inf).alpha() == 255
+    assert vizfx.hsv(0.5, 0.5, 0.5, -20).alpha() == 0 and vizfx.hsv(0.5, 0.5, 0.5, 9999).alpha() == 255
+    img = QImage(64, 64, QImage.Format.Format_RGB32)
+    for cls in vizfx.CLASSIC:
+        for w, h in ((0, 0), (1, 1), (200, 0), (0, 100), (320, 180)):
+            e = cls()
+            for beat in (False, True):
+                a.beat = beat
+                p = QPainter(img)
+                try:
+                    e.paint(p, w, h, a); e.paint(p, w, h, a)
+                finally:
+                    p.end()
+
+
+def test_a_broken_effect_cannot_take_the_program_down(capsys, monkeypatch):
+    from hivefi.ui.viz_fullscreen import FullscreenVisualizer
+    fs = FullscreenVisualizer(Config()); fs.resize(400, 300); failed = []
+    fs.effectFailed.connect(lambda n, m: failed.append((n, m)))
+    fs.auto = False
+    fs.select("Battery")
+    def boom(*a, **k):
+        raise ZeroDivisionError("division by zero")
+    fs.effect.paint = boom
+    fs.grab()                                                  # used to abort the whole application
+    assert failed and failed[0][0] == "Battery" and "ZeroDivisionError" in failed[0][1]
+    assert "Battery" in fs.broken and fs.effect.name != "Battery"
+    assert "ZeroDivisionError" in capsys.readouterr().err        # the traceback is still printed for the bug report
+    n = len(failed)
+    for _ in range(5):
+        fs.grab()                                              # the next effect keeps painting
+    assert len(failed) == n
+    fs.set_auto(True, 5); seen = set()
+    for _ in range(3 * len(fs.effects)):
+        fs._since_switch = 6; fs._tick(); seen.add(fs.effect.name)
+    assert "Battery" not in seen and len(seen) >= 3            # automatic cycling avoids the broken effect
+    # everything broken: no crash, no endless switching
+    for cls in vizfx.effect_classes():                         # (effects are re-created when chosen: patch the classes)
+        monkeypatch.setattr(cls, "paint", boom, raising=False)
+        if cls.family == "milkdrop":
+            monkeypatch.setattr(cls, "paint_into", boom)
+    for _ in range(len(fs.effects) + 3):
+        fs.grab()
+    assert len(fs.broken) == len(fs.effects)
+    fs.grab()
+    # a window with no size paints nothing and does not fail
+    z = FullscreenVisualizer(Config()); z.resize(0, 0); z.grab(); assert not z.broken
+
+
+@pytest.mark.skipif(np is None, reason="numpy needed")
+def test_feedback_buffer_is_the_images_own_memory():
+    """Painting with QPainter and warping with numpy must act on the same pixels (a copy broke the feedback loop)."""
+    from PyQt6.QtGui import QColor
+    fb = vizfx.Feedback(64, 48)
+    p = QPainter(fb.image); p.fillRect(40, 23, 2, 2, QColor(200, 100, 50)); p.end()
+    assert tuple(fb.buf[23, 40][:3]) == (50, 100, 200)                                 # numpy sees what QPainter drew (BGR)
+    fb.warp(zoom=2.0, decay=1.0)
+    assert fb.image.pixelColor(40, 23).name() == "#000000"                             # the drawn dot moved away ...
+    assert fb.image.pixelColor(50, 23).name() == "#c86432"                             # ... and the image shows where it went
+    fb.clear(); assert fb.image.pixelColor(50, 23).name() == "#000000"
+    p = QPainter(fb.image); p.fillRect(0, 0, 5, 5, QColor(255, 255, 255)); p.end()
+    for _ in range(3):
+        fb.warp(decay=0.5)
+    assert fb.image.pixelColor(2, 2).red() in (31, 32)                                  # three halvings of 255
+    assert fb.image.pixelColor(2, 2).alpha() == 255
+
+
+@pytest.mark.skipif(np is None, reason="numpy needed")
+def test_feedback_effects_really_feed_back(tmp_path):
+    """A shape drawn once leaves a trail that keeps moving (zoom) and fading after the music stops."""
+    a = vizfx.Audio()
+    e = vizfx.TunnelVision(); fb = vizfx.Feedback(160, 90)
+    for _ in range(20):
+        a.feed([-10.0] * 512, {"rms": [-10, -10], "peak": [-3, -3]}); a.update(0.033); e.paint_into(fb, a)
+    lit = int((fb.buf[..., :3].max(axis=2) > 20).sum())
+    assert lit > 500
+    for _ in range(3):                                   # silence: nothing new is drawn, the old picture keeps warping
+        a.update(0.033)                                  # (no data arrives, so the bars relax)
+    before = fb.buf[..., :3].copy()
+    fb.warp(**e.motion(a.t, a))
+    assert not np.array_equal(before, fb.buf[..., :3])   # it moved
+    for _ in range(80):
+        a.update(0.033); fb.warp(**e.motion(a.t, a))
+    assert fb.buf[..., :3].max() < 25                    # and faded away

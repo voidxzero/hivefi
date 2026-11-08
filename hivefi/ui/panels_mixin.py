@@ -153,6 +153,8 @@ class PanelsMixin:
             c.save()
             fs.deleteLater()
         fs.closed.connect(closed)
+        fs.effectFailed.connect(lambda name, msg: self.statusBar().showMessage(
+            f"Visualizer effect '{name}' hit a problem and was skipped ({msg})", 10000))
         fs.start()
         return fs
 

@@ -12,6 +12,7 @@ from .. import vizfx
 class FullscreenVisualizer(QWidget):
     closed = pyqtSignal()
     effectChanged = pyqtSignal(str)
+    effectFailed = pyqtSignal(str, str)           # effect name, what went wrong (the effect is skipped from then on)
 
     def __init__(self, cfg, parent=None):
         super().__init__(parent, Qt.WindowType.Window)
@@ -35,6 +36,7 @@ class FullscreenVisualizer(QWidget):
         self._last = time.monotonic()
         self._cursor_at = time.monotonic()
         self._order: list[int] = []
+        self.broken: set[str] = set()
         self.timer = QTimer(self, interval=33, timeout=self._tick)
         self.frames = 0
 
@@ -71,20 +73,19 @@ class FullscreenVisualizer(QWidget):
 
     def _random_next(self):
         if not self._order:                                    # a shuffled round of all effects, no repeats within it
-            self._order = [i for i in range(len(self.effects)) if i != self.index]
+            self._order = [i for i in range(len(self.effects)) if i != self.index and self.effects[i].name not in self.broken]
             random.shuffle(self._order)
-        self._switch_to(self._order.pop())
+        if self._order:
+            self._switch_to(self._order.pop())
 
     def _switch_to(self, i):
-        old = self.effect.family
+        """Show another effect on a clean screen: nothing of the previous one (trails, particles, rings) is left."""
         self.index = i
+        self.effects[i] = type(self.effects[i])()                # fresh state: no leftover particles, rings, sparks...
         self._since_switch = 0.0
         self._overlay_at = time.monotonic()
-        if self._fb is not None:                                 # the old picture fades into the new effect
-            if self.effect.family != old:
-                self._fb.clear()
-            else:
-                self._fb.buf[..., :3] //= 5
+        if self._fb is not None:
+            self._fb.clear()
         self.effectChanged.emit(self.effect.name)
 
     def feed(self, mags, levels):
@@ -121,20 +122,37 @@ class FullscreenVisualizer(QWidget):
         self.update()
 
     def paintEvent(self, _e):
-        p = QPainter(self)
         w, h = self.width(), self.height()
+        if w < 2 or h < 2:                                     # not laid out yet / minimised: nothing to draw
+            return
+        p = QPainter(self)
         e = self.effect
-        if e.family == "milkdrop":
-            fb = self._feedback()
-            e.paint_into(fb, self.audio)
-            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            p.drawImage(QRectF(0, 0, w, h), fb.image)
-        else:
-            p.fillRect(self.rect(), QColor(0, 0, 0))
-            p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            e.paint(p, w, h, self.audio)
-        self._paint_overlay(p, w, h)
-        p.end()
+        try:
+            if e.family == "milkdrop":
+                fb = self._feedback()
+                e.paint_into(fb, self.audio)
+                p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                p.drawImage(QRectF(0, 0, w, h), fb.image)
+            else:
+                p.fillRect(self.rect(), QColor(0, 0, 0))
+                p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                e.paint(p, w, h, self.audio)
+            self._paint_overlay(p, w, h)
+        except Exception as ex:  # noqa: BLE001 - an exception escaping paintEvent aborts the whole application
+            self._effect_failed(e, ex)
+        finally:
+            p.end()
+
+    def _effect_failed(self, e, ex):
+        """A broken effect must never take the program down: report it, skip it from now on, show the next one."""
+        import traceback
+        traceback.print_exception(type(ex), ex, ex.__traceback__)
+        self.broken.add(e.name)
+        self.effectFailed.emit(e.name, f"{type(ex).__name__}: {ex}")
+        ok = [i for i, x in enumerate(self.effects) if x.name not in self.broken]
+        if ok:
+            nxt = next((i for i in ok if i > self.index), ok[0])
+            self._switch_to(nxt)
 
     def _paint_overlay(self, p, w, h):
         age = time.monotonic() - self._overlay_at

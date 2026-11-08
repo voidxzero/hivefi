@@ -46,13 +46,14 @@ class Audio:
     def feed(self, mags, levels):
         self._idle = 0.0
         if mags:
-            self.raw = to_bars(mags, self.N)
+            self.raw = to_bars([fin(m, FLOOR_DB) for m in mags], self.N)
         if levels and levels.get("rms"):
-            rms = max(levels["rms"])
+            rms = max(fin(r, FLOOR_DB) for r in levels["rms"])
             self.level = max(0.0, min(1.0, (rms - FLOOR_DB) / -FLOOR_DB))
 
     def update(self, dt: float):
         """Advance one frame: smooth the bars, work out bass/mid/treble and detect a beat."""
+        dt = max(0.0, min(0.25, fin(dt, 0.033)))
         self.dt, self.t = dt, self.t + dt
         self._idle += dt
         if self._idle > 0.4:                                       # no data (paused / silent): everything relaxes to zero
@@ -91,9 +92,17 @@ class Audio:
                 for i in range(0, count)]
 
 
+def fin(x, default=0.0) -> float:
+    """x, unless it is NaN or infinite (a bad number must never reach int() or Qt)."""
+    try:
+        return x if math.isfinite(x) else default
+    except TypeError:
+        return default
+
+
 def hsv(h, s=1.0, v=1.0, a=255):
-    c = QColor.fromHsvF(h % 1.0, max(0.0, min(1.0, s)), max(0.0, min(1.0, v)))
-    c.setAlpha(a)
+    c = QColor.fromHsvF(fin(h) % 1.0, max(0.0, min(1.0, fin(s))), max(0.0, min(1.0, fin(v, 1.0))))
+    c.setAlpha(int(max(0, min(255, fin(a, 255)))))
     return c
 
 
@@ -172,10 +181,11 @@ class Battery(Effect):
             self.rings.append([0.0, a.t * 0.1])
         self.rings = [[r + a.dt * (0.35 + a.level), hue] for r, hue in self.rings if r < 1.3]
         p.setBrush(Qt.BrushStyle.NoBrush)
+        squash = h / w if w > 0 else 1.0
         for r, hue in self.rings:
             half = r * max(w, h) * 0.5
             p.setPen(QPen(hsv(hue, 0.9, 1.0, int(255 * max(0.0, 1 - r / 1.3))), 3 + 8 * (1 - min(1, r))))
-            p.drawRoundedRect(QRectF(w / 2 - half, h / 2 - half * h / w, half * 2, half * 2 * h / w), 18, 18)
+            p.drawRoundedRect(QRectF(w / 2 - half, h / 2 - half * squash, half * 2, half * 2 * squash), 18, 18)
         p.setPen(Qt.PenStyle.NoPen); p.setBrush(hsv(a.t * 0.1, 0.8, 1.0, 230))
         core = min(w, h) * (0.04 + 0.12 * a.bass)
         p.drawEllipse(QPointF(w / 2, h / 2), core, core)
@@ -256,14 +266,19 @@ class Feedback:
 
     def __init__(self, w, h):
         self.w, self.h = w, h
-        self.buf = np.zeros((h, w, 4), np.uint8)
-        self.buf[..., 3] = 255
+        # The numpy array is a view of the QImage's own memory: painting with QPainter and warping with numpy act on
+        # the same pixels. (Handing numpy memory to QImage's constructor makes Qt work on a copy, which silently turned
+        # the feedback loop into plain accumulation.)
+        self.image = QImage(w, h, QImage.Format.Format_RGB32)
+        self.image.fill(0xFF000000)
+        ptr = self.image.bits()
+        ptr.setsize(self.image.sizeInBytes())
+        self.buf = np.frombuffer(ptr, np.uint8).reshape(h, self.image.bytesPerLine() // 4, 4)[:, :w]
         aspect = w / h
         ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
-        self.U = (xs / (w - 1) * 2 - 1) * aspect                 # -aspect..aspect
-        self.V = ys / (h - 1) * 2 - 1                            # -1..1
+        self.U = (xs / max(1, w - 1) * 2 - 1) * aspect           # -aspect..aspect
+        self.V = ys / max(1, h - 1) * 2 - 1                      # -1..1
         self.aspect = aspect
-        self.image = QImage(self.buf.data, w, h, w * 4, QImage.Format.Format_RGB32)
 
     def clear(self):
         self.buf[..., :3] = 0
@@ -289,9 +304,9 @@ class Feedback:
             roll = int(round(abs(hue[0]) * 40)) % 3
             if roll:
                 out = np.roll(out, roll if hue[0] > 0 else -roll, axis=2)
-        if mirror:
-            out = np.maximum(out, out[:, ::-1])
-            out = np.maximum(out, out[::-1])
+        if mirror:                                               # kaleidoscope: average with the mirror image (max would wash out)
+            out = (out + out[:, ::-1]) * 0.5
+            out = (out + out[::-1]) * 0.5
         self.buf[..., :3] = np.clip(out, 0, 255).astype(np.uint8)
 
 
@@ -373,7 +388,7 @@ class NeonRain(MilkEffect):
     name = "Neon Rain"
 
     def motion(self, t, a):
-        return dict(zoom=0.995, dy=-0.012 - 0.01 * a.level, decay=0.9, ripple=0.003, freq=9, hue=(0.0, 0, 0))
+        return dict(zoom=0.998, dy=-0.02 - 0.015 * a.level, decay=0.955, ripple=0.003, freq=9, hue=(0.0, 0, 0))
 
     def shapes(self, p, w, h, t, a):
         n = Audio.N
