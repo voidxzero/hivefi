@@ -56,33 +56,73 @@ def draw(painter: QPainter, rect: QRectF, kind: str, color: QColor):
         painter.drawArc(QRectF(9, 4.5, 11, 15), -60 * 16, 120 * 16)
     elif kind == "muted":
         painter.drawLine(QPointF(15.5, 9), QPointF(21, 15)); painter.drawLine(QPointF(21, 9), QPointF(15.5, 15))
+    elif kind == "shuffle":
+        a = QPainterPath(); a.moveTo(3, 7); a.lineTo(7, 7); a.cubicTo(12, 7, 12, 17, 17, 17); a.lineTo(18.5, 17)
+        b = QPainterPath(); b.moveTo(3, 17); b.lineTo(7, 17); b.cubicTo(12, 17, 12, 7, 17, 7); b.lineTo(18.5, 7)
+        painter.drawPath(a); painter.drawPath(b)
+        _heads(painter, color, ((21.5, 7, True), (21.5, 17, True)))
+    elif kind in ("repeat", "repeat_one"):
+        top = QPainterPath(); top.moveTo(4, 12.5); top.lineTo(4, 9.5); top.quadTo(4, 7, 6.5, 7); top.lineTo(17, 7)
+        bot = QPainterPath(); bot.moveTo(20, 11.5); bot.lineTo(20, 14.5); bot.quadTo(20, 17, 17.5, 17); bot.lineTo(7, 17)
+        painter.drawPath(top); painter.drawPath(bot)
+        _heads(painter, color, ((20.5, 7, True), (3.5, 17, False)))
+        if kind == "repeat_one":
+            painter.setPen(Qt.PenStyle.NoPen); painter.setBrush(color)
+            one = QPainterPath()
+            one.moveTo(10.6, 10.4); one.lineTo(12.4, 9.2); one.lineTo(13.4, 9.2); one.lineTo(13.4, 14.8)
+            one.lineTo(11.9, 14.8); one.lineTo(11.9, 11.3); one.lineTo(10.6, 12.1); one.closeSubpath()
+            painter.drawPath(one)
+    painter.restore()
+
+
+def _heads(painter: QPainter, color: QColor, heads):
+    """Filled arrowheads; (tip x, tip y, pointing right)."""
+    painter.save()
+    painter.setPen(Qt.PenStyle.NoPen); painter.setBrush(color)
+    for x, y, right in heads:
+        d = -4.2 if right else 4.2
+        tri = QPainterPath(); tri.moveTo(x, y); tri.lineTo(x + d, y - 3.2); tri.lineTo(x + d, y + 3.2); tri.closeSubpath()
+        painter.drawPath(tri)
     painter.restore()
 
 
 class _Engine(QIconEngine):
-    def __init__(self, kind: str):
+    def __init__(self, kind: str, accent_when_on: bool = False):
         super().__init__()
-        self.kind = kind
+        self.kind, self.accent_when_on = kind, accent_when_on
 
     def paint(self, painter, rect, mode, state):
         pal = QApplication.palette()
         group = QPalette.ColorGroup.Disabled if mode == QIcon.Mode.Disabled else QPalette.ColorGroup.Active
         role = QPalette.ColorRole.HighlightedText if mode == QIcon.Mode.Selected else QPalette.ColorRole.ButtonText
+        if self.accent_when_on and state == QIcon.State.On and mode != QIcon.Mode.Disabled:
+            role = QPalette.ColorRole.Link                     # the skin's accent colour
         draw(painter, QRectF(rect), self.kind, pal.color(group, role))
 
     def pixmap(self, size, mode, state):
-        pm = QPixmap(size); pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm); self.paint(p, QRect(0, 0, size.width(), size.height()), mode, state); p.end()
+        return self.scaledPixmap(size, mode, state, 1.0)
+
+    def scaledPixmap(self, size, mode, state, scale):
+        """Drawn at the screen's pixel density, so the glyphs stay sharp on HiDPI displays."""
+        scale = max(1.0, scale)
+        pm = QPixmap(round(size.width() * scale), round(size.height() * scale)); pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm); self.paint(p, QRect(0, 0, pm.width(), pm.height()), mode, state); p.end()
+        pm.setDevicePixelRatio(scale)
         return pm
 
     def clone(self):
-        return _Engine(self.kind)
+        return _Engine(self.kind, self.accent_when_on)
 
 
 def media_icon(sp) -> QIcon | None:
     """A skin-coloured icon for a QStyle media StandardPixmap, or None for anything else."""
     kind = KINDS.get(sp)
     return QIcon(_Engine(kind)) if kind else None
+
+
+def toggle_icon(kind: str) -> QIcon:
+    """shuffle / repeat / repeat_one: text colour when off, the skin's accent when the (checkable) button is on."""
+    return QIcon(_Engine(kind, accent_when_on=True))
 
 
 def icon(widget, sp) -> QIcon:

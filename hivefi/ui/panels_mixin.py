@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (QDockWidget, QFrame, QHBoxLayout, QInputDialog, QLa
                              QPushButton, QSizePolicy, QSlider, QStyle, QTabBar, QToolBar, QVBoxLayout, QWidget)
 
 from .. import session, waveform
+from . import icons
 from .seekbar import STYLES as SEEK_STYLES, SeekBar
 from .visualizer import STYLES as VIS_STYLES, VisualizerPanel
 
@@ -44,9 +45,13 @@ class PanelsMixin:
         self.act_stop = tb.addAction(self._icon(S.SP_MediaStop), "Stop", self.player.stop)
         self.act_next = tb.addAction(self._icon(S.SP_MediaSkipForward), "Next", self.player.next)
         tb.addSeparator()
-        self.btn_shuffle = QPushButton("Shuffle"); self.btn_shuffle.setCheckable(True)
+        self.btn_shuffle = QPushButton(); self.btn_shuffle.setObjectName("btn_shuffle"); self.btn_shuffle.setCheckable(True)
+        self.btn_shuffle.setIcon(icons.toggle_icon("shuffle")); self.btn_shuffle.setIconSize(QSize(20, 20))
         self.btn_shuffle.setChecked(self.cfg.shuffle); self.btn_shuffle.toggled.connect(self._set_shuffle)
-        self.btn_repeat = QPushButton(); self.btn_repeat.clicked.connect(self._cycle_repeat)
+        self.btn_shuffle.toggled.connect(lambda on: self.btn_shuffle.setToolTip(f"Shuffle: {'on' if on else 'off'}"))
+        self.btn_shuffle.setToolTip(f"Shuffle: {'on' if self.cfg.shuffle else 'off'}")
+        self.btn_repeat = QPushButton(); self.btn_repeat.setObjectName("btn_repeat"); self.btn_repeat.setCheckable(True)
+        self.btn_repeat.setIconSize(QSize(20, 20)); self.btn_repeat.clicked.connect(self._cycle_repeat)
         self._update_repeat_label()
         tb.addWidget(self.btn_shuffle); tb.addWidget(self.btn_repeat)
         # --- volume

@@ -922,7 +922,10 @@ class MainWindow(PanelsMixin, QMainWindow):
         self.cfg.repeat = self.player.repeat; self._update_repeat_label()
 
     def _update_repeat_label(self):
-        self.btn_repeat.setText({"off": "Repeat: off", "all": "Repeat: all", "one": "Repeat: one"}[self.cfg.repeat])
+        mode = self.cfg.repeat
+        self.btn_repeat.setIcon(icons.toggle_icon("repeat_one" if mode == "one" else "repeat"))
+        self.btn_repeat.setChecked(mode != "off")                 # lit in the accent colour while repeating
+        self.btn_repeat.setToolTip({"off": "Repeat: off", "all": "Repeat: all", "one": "Repeat: one"}[mode])
 
     # ------------------------------------------------ plays / ratings / stars
     def _on_played(self, t):

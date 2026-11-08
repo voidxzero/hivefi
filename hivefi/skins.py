@@ -218,6 +218,9 @@ QPushButton:pressed, QToolButton:pressed {{ background: {t['btn_bot']}; {'border
 QPushButton:checked, QToolButton:checked {{ background: {t['accent']}; color: {t['accent_text']};
     border-color: {t['accent']}; }}
 QPushButton:disabled, QToolButton:disabled {{ color: {t['dim']}; }}
+QPushButton#btn_shuffle, QPushButton#btn_repeat {{ padding: 3px 6px; }}
+QPushButton#btn_shuffle:checked, QPushButton#btn_repeat:checked {{ background: {_mix(t['btn_bot'], t['accent'], 0.18)};
+    border-color: {t['accent']}; }}
 QLineEdit, QPlainTextEdit, QTextEdit {{ background: {t['base']}; color: {t['text']};
     border: {'2px inset ' + t['btn_top'] if old else '1px solid ' + bd}; border-radius: {r}px; padding: 2px 4px;
     selection-background-color: {t['highlight']}; selection-color: {t['hl_text']}; }}
