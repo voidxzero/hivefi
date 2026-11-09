@@ -2041,8 +2041,43 @@ class MainWindow(PanelsMixin, QMainWindow):
         super().closeEvent(e)
 
 
+def install_crash_log(path=None):
+    """Write every unhandled error to crash.log in the data folder instead of losing it. An error in a Qt slot no
+    longer takes the whole program down (PyQt aborts only while the default excepthook is in place); real crashes
+    in native code (GStreamer, Qt) still end it, but faulthandler writes the Python stack of every thread first."""
+    import faulthandler, threading, traceback
+    path = Path(path) if path else data_dir() / "crash.log"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.stat().st_size > 2_000_000:          # keep it small: start over
+            path.unlink()
+        fh = open(path, "a", buffering=1, encoding="utf-8")
+    except OSError:
+        return None
+    fh.write(f"\n=== Hivefi started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+    faulthandler.enable(fh, all_threads=True)
+
+    def report(kind, etype, value, tb):
+        text = "".join(traceback.format_exception(etype, value, tb))
+        fh.write(f"--- {kind} {time.strftime('%Y-%m-%d %H:%M:%S')}\n{text}")
+        sys.__stderr__ and sys.__stderr__.write(text)
+        app = QApplication.instance()
+        win = next((w for w in (app.topLevelWidgets() if app else []) if isinstance(w, MainWindow)), None)
+        if win is not None and threading.current_thread() is threading.main_thread():
+            try:
+                win.statusBar().showMessage(f"Internal error: {value!r} (details in {path})", 15000)
+            except Exception:  # noqa: BLE001
+                pass
+
+    sys.excepthook = lambda et, v, tb: report("error", et, v, tb)
+    threading.excepthook = lambda a: report(f"error in thread {a.thread.name if a.thread else '?'}",
+                                            a.exc_type, a.exc_value, a.exc_traceback)
+    return path
+
+
 def main():
     app = QApplication(sys.argv)
+    install_crash_log()
     app.setApplicationName("hivefi"); app.setDesktopFileName("hivefi")
     cfg = Config.load()
     skins.apply_skin(app, cfg.skin)
