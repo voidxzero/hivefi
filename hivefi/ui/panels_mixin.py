@@ -80,6 +80,10 @@ class PanelsMixin:
         for act, mode in ((self.act_browser, "browser"), (self.act_albums, "albums")):
             act.setCheckable(True); self.mode_group.addAction(act)
             act.triggered.connect(lambda _c, m=mode: self._set_view_mode(m))
+        tm.addSeparator()
+        self.act_list_toggle = tm.addAction("Album and Tracks"); self.act_list_toggle.setCheckable(True)
+        self.act_list_toggle.setToolTip("Show the track list grouped by album, with the cover")
+        self.act_list_toggle.triggered.connect(lambda on: self._set_list_mode("albums" if on else "details"))
         self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
         # --- seek bar (second row so it can stretch across the window)
         tk = self._make_toolbar("Seek Bar", "tb_seek")
@@ -444,20 +448,33 @@ class PanelsMixin:
         self._apply_splits(self.browser_split, self.cfg.browser_state)
 
     # ------------------------------------------------------------------ session
-    def _session_state(self):
-        m, P = self.model, self.player
-        pos = P.mp.position() if P.current else 0
-        playing = P.mp.playbackState().name == "PlayingState" if P.current else False
-        sel = [t["id"] for t in self._selected()[:50]]
+    def _top_row(self):
+        """First row on screen in whichever track list view is showing."""
+        if getattr(self.cfg, "list_mode", "details") == "albums":
+            return self.album_view.top_row()
         top = self.table.indexAt(self.table.viewport().rect().topLeft())
+        return top.row() if top.isValid() else None
+
+    def _view_state(self):
+        """What one library view looks like: a tab, or the window when the session is saved."""
+        m, hh = self.model, self.table.horizontalHeader()
+        top = self._top_row()
         return {
             "source": list(self.source), "genre": m.genre, "artist": m.artist, "album": m.album,
-            "search": self.search.text(), "queue": [t["id"] for t in P.queue if t.get("id")], "index": P.index,
-            "pos": pos, "playing": playing, "selected": sel,
-            "top": m.tracks[top.row()]["id"] if top.isValid() and top.row() < len(m.tracks) else None,
-            "sort": [self.table.horizontalHeader().sortIndicatorSection(),
-                     int(self.table.horizontalHeader().sortIndicatorOrder().value)],
+            "search": self.search.text(), "selected": [t["id"] for t in self._selected()[:50]],
+            "top": m.tracks[top]["id"] if top is not None and top < len(m.tracks) else None,
+            "sort": [hh.sortIndicatorSection(), int(hh.sortIndicatorOrder().value)],
+            "view_mode": self.cfg.view_mode, "list_mode": self.cfg.list_mode,
         }
+
+    def _session_state(self):
+        P = self.player
+        s = self._view_state()
+        s.update({"queue": [t["id"] for t in P.queue if t.get("id")], "index": P.index,
+                  "pos": P.mp.position() if P.current else 0,
+                  "playing": P.mp.playbackState().name == "PlayingState" if P.current else False})
+        s.update(self._tabs_state())
+        return s
 
     def _save_session(self):
         try:
@@ -472,37 +489,84 @@ class PanelsMixin:
         except Exception:  # noqa: BLE001 - never let a failed autosave bother the user
             pass
 
-    def _restore_session(self):
-        """Put everything back the way it was when the app was closed. Always ends in a loaded track list."""
-        s = session.load()
+    def _select_tree_source(self, src):
+        """Highlight a source in the sources panel without reloading anything."""
+        it = self._items.get(src)
+        if it is None and src[0] == "folder":
+            it = self._reveal_folder(src[1])
+        if it is not None:
+            self.tree.blockSignals(True); self.tree.setCurrentItem(it); self.tree.blockSignals(False)
+
+    def _reveal_row(self, row, select=False, center=True):
+        """Bring a row into view in both track list views (and select it)."""
+        idx = self.model.index(row, 2)
+        if select:
+            self.table.selectRow(row)
+        self.table.scrollTo(idx, self.table.ScrollHint.PositionAtCenter if center else self.table.ScrollHint.PositionAtTop)
+        self.album_view.scroll_to_row(row, center=center)
+
+    def _apply_view_state(self, s):
+        """Show a saved view (a tab or the last session): source, search, browser, sort, view modes, selection and
+        scroll position. Always ends in a loaded track list; a source that no longer exists falls back to All Music."""
+        from .models import COLUMNS
+        self._search_timer.stop()
+        if getattr(self, "_grid_timer", None):
+            self._grid_timer.stop()
         try:
-            src = tuple(s.get("source") or ())
+            src = tuple(s.get("source") or ("all", None))
             if len(src) == 2 and src[0] == "folder" and isinstance(src[1], (list, tuple)):
                 src = ("folder", tuple(src[1]))                    # JSON turned the folder tuple into a list
-            if len(src) == 2 and ((src[0], src[1]) in self._items or src[0] == "folder"):
-                self.source = src
-                self.refresh_playlists()                           # highlights the saved source in the tree
-            self.search.blockSignals(True); self.search.setText(s.get("search", "")); self.search.blockSignals(False)
-            self.model.text = (s.get("search") or "").lower()
+            if not (len(src) == 2 and ((src[0], src[1]) in self._items or src[0] == "folder")):
+                src = ("all", None)
+            lm = s.get("list_mode")
+            if lm in ("details", "albums") and lm != self.cfg.list_mode:
+                self._set_list_mode(lm, sort=False)
+            vm = s.get("view_mode")
+            if vm in ("browser", "albums") and vm != self.cfg.view_mode:
+                self._set_view_mode(vm)
+            sort = s.get("sort")
+            if isinstance(sort, list) and len(sort) == 2 and 0 < int(sort[0]) < len(COLUMNS):
+                self.table.horizontalHeader().setSortIndicator(int(sort[0]), Qt.SortOrder(int(sort[1])))
+                self._sorted_once = True
+            self.source = src
+            self._select_tree_source(src)
+            self.search.blockSignals(True); self.search.setText(s.get("search") or ""); self.search.blockSignals(False)
+            self.model.text = (s.get("search") or "").lower(); self.model._base = None
         except Exception:  # noqa: BLE001
             s = {}
         self.load_source()
-        if not s:
+        if src[0] == "folder" and self.source != src:
             return
         try:
             saved = (s.get("genre"), s.get("artist"), s.get("album"))
             if any(saved):
                 self._restore_browser(saved); self._refresh_grid(); self._update_status()
             ids = s.get("selected") or []
-            row = next((r for i in ids if (r := self.model.row_of(i)) is not None), None)
-            if row is None and s.get("top") is not None:
-                row = self.model.row_of(s["top"])
+            rows = [r for i in ids if (r := self.model.row_of(i)) is not None]
+            if rows:
+                self.table.clearSelection()
+                for r in rows:
+                    self.table.selectionModel().select(self.model.index(r, 0), self.table.selectionModel().SelectionFlag.Select
+                                                       | self.table.selectionModel().SelectionFlag.Rows)
+                self.table.selectionModel().setCurrentIndex(self.model.index(rows[0], 2),
+                                                            self.table.selectionModel().SelectionFlag.NoUpdate)
+            row = self.model.row_of(s["top"]) if s.get("top") is not None else None
             if row is not None:
-                idx = self.model.index(row, 2)
-                if ids and self.model.row_of(ids[0]) is not None:
-                    self.table.selectRow(row)
-                self.table.scrollTo(idx, self.table.ScrollHint.PositionAtTop if not ids else
-                                    self.table.ScrollHint.PositionAtCenter)
+                self._reveal_row(row, center=False)
+            elif rows:
+                self._reveal_row(rows[0])
+        except Exception:  # noqa: BLE001
+            pass
+        self._update_tab_label()
+
+    def _restore_session(self):
+        """Put everything back the way it was when the app was closed. Always ends in a loaded track list."""
+        s = session.load()
+        self._apply_view_state(s)
+        if not s:
+            return
+        try:
+            self._restore_tabs(s)
             mode = self.cfg.resume_mode
             if mode != "off" and s.get("queue"):
                 by_id = {t["id"]: t for t in self._tracks()}

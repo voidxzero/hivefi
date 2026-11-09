@@ -22,6 +22,7 @@ from ..player import Player
 from ..subsonic import Subsonic, SubsonicError
 from .. import art, convert, coverart, devicesync, inbox as inbox_mod, lastfm, notify, podcasts, sortkey, folders, stats as libstats, libexport, listenbrainz, lyrics, radio, tagtools, organizer, rgscan, skins, smart, tagedit, updater
 from .album_grid import AlbumGrid
+from .album_tracks import AlbumTracksView
 from .dialogs import TagDialog
 from .audio_dialog import AudioDialog
 from .duplicates_dialog import DuplicatesDialog
@@ -35,6 +36,7 @@ from .tagtools_dialog import TagToolsDialog
 from .tools_dialogs import ConvertDialog, MissingDialog, OrganizeDialog, ReplayGainDialog
 from .equalizer import EqualizerPanel
 from .mini import MiniPlayer
+from .tabs_mixin import TabsMixin
 from .panels_mixin import STATE_VERSION, PanelsMixin
 from .seekbar import STYLES as SEEK_STYLES
 from .visualizer import STYLES as VIS_STYLES
@@ -92,7 +94,7 @@ class SourceTree(QTreeWidget):
             e.acceptProposedAction()
 
 
-class MainWindow(PanelsMixin, QMainWindow):
+class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
     def __init__(self, cfg: Config, db: Database):
         super().__init__()
         self.cfg, self.db = cfg, db
@@ -139,6 +141,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         QTimer.singleShot(0, self._restore_splits)               # needs the window laid out at its final size
         self._start_autosave()
         self._set_view_mode(cfg.view_mode, initial=True)
+        self._set_list_mode(cfg.list_mode, sort=False)
         self._apply_skin_visuals()
         self.sleep_timer = QTimer(self, singleShot=True, timeout=self._sleep_fire)
         self._setup_watch()
@@ -220,6 +223,8 @@ class MainWindow(PanelsMixin, QMainWindow):
 
     def _build_ui(self):
         self._build_toolbars()
+        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
+        self._build_tabs()
 
         # sources tree
         self.tree = SourceTree(); self.tree.setHeaderHidden(True)
@@ -272,6 +277,16 @@ class MainWindow(PanelsMixin, QMainWindow):
                   context=Qt.ShortcutContext.WidgetShortcut)
         QShortcut(QKeySequence(Qt.Key.Key_Return), self.table, self._play_selected,
                   context=Qt.ShortcutContext.WidgetShortcut)
+        self.album_view = AlbumTracksView(self.model, self.table.selectionModel(), lambda: self.api)
+        self.album_view.activated.connect(lambda r: self._on_double(self.model.index(r, 2)))
+        self.album_view.contextMenu.connect(lambda gpos: self._track_menu(None, gpos))
+        self.album_view.ratingClicked.connect(lambda r, star: self._rate_row(r, star))
+        QShortcut(QKeySequence(Qt.Key.Key_Space), self.album_view, self.player.toggle,
+                  context=Qt.ShortcutContext.WidgetShortcut)
+        for w in (self.table, self.album_view):                  # Delete: remove from the library (asks first)
+            QShortcut(QKeySequence(Qt.Key.Key_Delete), w, self._delete_key,
+                      context=Qt.ShortcutContext.WidgetShortcut)
+        self.list_stack = QStackedWidget(); self.list_stack.addWidget(self.table); self.list_stack.addWidget(self.album_view)
 
         # Every part of the window is a panel, the track list included. Qt wants a central widget: this one is an
         # anchor that is as wide as the window but has no height, so the panels take all the room. The browser and
@@ -281,14 +296,14 @@ class MainWindow(PanelsMixin, QMainWindow):
         anchor.setMaximumHeight(0); anchor.setMinimumSize(0, 0)
         self.setCentralWidget(anchor)
         self.setDockNestingEnabled(True)
-        self.top_stack.setMinimumHeight(110); self.table.setMinimumHeight(80)
+        self.top_stack.setMinimumHeight(110); self.list_stack.setMinimumHeight(80)
         self.setCorner(Qt.Corner.TopLeftCorner, Qt.DockWidgetArea.LeftDockWidgetArea)
         self.setCorner(Qt.Corner.BottomLeftCorner, Qt.DockWidgetArea.LeftDockWidgetArea)
         self.setCorner(Qt.Corner.TopRightCorner, Qt.DockWidgetArea.RightDockWidgetArea)
         self.setCorner(Qt.Corner.BottomRightCorner, Qt.DockWidgetArea.RightDockWidgetArea)
         self.dock_browser = self._dock("Library Browser", self.top_stack, "dock_browser",
                                        Qt.DockWidgetArea.TopDockWidgetArea)
-        self.dock_tracks = self._dock("Track List", self.table, "dock_tracks", Qt.DockWidgetArea.TopDockWidgetArea)
+        self.dock_tracks = self._dock("Track List", self.list_stack, "dock_tracks", Qt.DockWidgetArea.TopDockWidgetArea)
         self.splitDockWidget(self.dock_browser, self.dock_tracks, Qt.Orientation.Vertical)
 
         # dockable panels
@@ -341,6 +356,13 @@ class MainWindow(PanelsMixin, QMainWindow):
         f.addAction("&Preferences…", QKeySequence("Ctrl+,"), self.open_settings)
         f.addSeparator()
         f.addAction("&Quit", QKeySequence("Ctrl+Q"), self._quit)
+        e = mb.addMenu("&Edit")
+        e.addAction("Select &All", QKeySequence("Ctrl+A"), self._select_all)
+        e.addAction("&Edit Tags…", QKeySequence("Shift+Return"),
+                    lambda: (lambda loc: loc and self._edit_tags(loc))([t for t in self._selected() if t["source"] == "local"]))
+        e.addSeparator()
+        e.addAction("&Shuffle Play Selection", lambda: self._shuffle_play(self._selected()))
+        e.addAction("&Remove from Library…", lambda: self._remove_from_library())
         p = mb.addMenu("&Playback")
         p.addAction("Play/Pause", QKeySequence("Ctrl+Space"), self.player.toggle)
         p.addAction("Next", QKeySequence("Ctrl+Right"), self.player.next)
@@ -418,6 +440,14 @@ class MainWindow(PanelsMixin, QMainWindow):
         vm.addAction("Show Visualizer", self.dock_vis.show)
         v.addAction("Columns View", lambda: self._set_view_mode("browser"))
         v.addAction("Albums View", lambda: self._set_view_mode("albums"))
+        lg = QActionGroup(self)
+        self.act_list_details = v.addAction("Track List: Details"); self.act_list_albums = v.addAction("Track List: Album and Tracks")
+        for a, mode in ((self.act_list_details, "details"), (self.act_list_albums, "albums")):
+            a.setCheckable(True); lg.addAction(a); a.setChecked(self.cfg.list_mode == mode)
+            a.triggered.connect(lambda _c, md=mode: self._set_list_mode(md))
+        v.addSeparator()
+        v.addAction("New Tab", QKeySequence("Ctrl+T"), lambda: self._new_tab())
+        v.addAction("Close Tab", QKeySequence("Ctrl+W"), lambda: self._close_tab())
         self.skin_menu = v.addMenu("Skin"); self._build_skin_menu()
         v.addSeparator()
         v.addAction("Mini Player", QKeySequence("Ctrl+M"), self._enter_mini)
@@ -438,6 +468,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         tl.addAction("Find &Missing Files…", self._find_missing)
         h = mb.addMenu("&Help")
         h.addAction("Check for &Updates…", lambda: self.check_updates(manual=True))
+        h.addAction("&About Hivefi…", self._about)
 
     def _connect_player(self):
         P = self.player
@@ -668,8 +699,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         if track is not None:
             row = self.model.row_of(track["id"])
             if row is not None:
-                self.table.selectRow(row)
-                self.table.scrollTo(self.model.index(row, 2), self.table.ScrollHint.PositionAtCenter)
+                self._reveal_row(row, select=True)
         return True
 
     def _np_navigate(self, kind, t):
@@ -820,6 +850,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         self._refresh_grid()
         self._update_status()
         self._sel_changed()
+        self._update_tab_label()
 
     def _header_sort(self, section):
         if self.source[0] in ("queue", "playlist", "smart", "folder", "radio", "history", "podcast") or section in (0,):
@@ -871,6 +902,7 @@ class MainWindow(PanelsMixin, QMainWindow):
 
     def _on_search(self, text):
         self.model.set_filters(text=text, genre=None, artist=None, album=None)
+        self._update_tab_label()
         self._fill_browser("genre")
         if self.cfg.view_mode == "albums":                       # thousands of album tiles: rebuild after typing settles
             if not hasattr(self, "_grid_timer"):
@@ -1111,11 +1143,14 @@ class MainWindow(PanelsMixin, QMainWindow):
         self._kick_flush()
 
     # ------------------------------------------------------- menus
-    def _track_menu(self, pos):
+    def _track_menu(self, pos, gpos=None):
         sel = self._selected()
         if not sel: return
+        gpos = gpos if gpos is not None else self.table.viewport().mapToGlobal(pos)
         m = QMenu(self)
         m.addAction("Play Now", lambda: self.player.play_list(sel, 0))
+        if len(sel) > 1:
+            m.addAction("Shuffle Play", lambda: self._shuffle_play(sel))
         m.addAction("Play Next", lambda: self.player.enqueue(sel, next_=True))
         m.addAction("Queue Last", lambda: self.player.enqueue(sel))
         if all(t["source"] == "podcast" for t in sel):
@@ -1129,14 +1164,14 @@ class MainWindow(PanelsMixin, QMainWindow):
                 m.addAction("Download Episodes", lambda: self._download_episodes(sel))
             played = all(t.get("play_count") for t in sel)
             m.addAction("Mark as Unplayed" if played else "Mark as Played", lambda: self._mark_episodes(sel, not played))
-            m.exec(self.table.viewport().mapToGlobal(pos)); return
+            m.exec(gpos); return
         if all(t["source"] == "radio" for t in sel):
             m.addSeparator()
             if len(sel) == 1:
                 m.addAction("Edit Station…", lambda: self._edit_station(-sel[0]["id"]))
             m.addAction("Delete Station" + ("s" if len(sel) > 1 else ""),
                         lambda: [self._delete_station(-t["id"], ask=False) for t in sel])
-            m.exec(self.table.viewport().mapToGlobal(pos)); return
+            m.exec(gpos); return
         m.addSeparator()
         rm = m.addMenu("Rating")
         for r in range(6):
@@ -1171,12 +1206,19 @@ class MainWindow(PanelsMixin, QMainWindow):
             cm.addAction("Set Cover from Image…", lambda: self._set_cover(local))
             cm.addAction("Find Online…", lambda: self._find_covers_online(local, only_missing=False))
             cm.addAction("Remove Embedded Cover", lambda: self._set_cover(local, remove=True))
-        m.exec(self.table.viewport().mapToGlobal(pos))
+        m.addSeparator()
+        m.addAction("Remove from Library…", lambda: self._remove_from_library(sel))
+        m.exec(gpos)
 
     def _tree_menu(self, pos):
         it = self.tree.itemAt(pos)
         d = it.data(0, Qt.ItemDataRole.UserRole) if it else None
         m = QMenu(self)
+        if d and d[0] in ("playlist", "smart"):
+            src = tuple(d)
+            m.addAction("Play", lambda: (lambda ts: ts and self.player.play_list(ts, 0))(self._source_tracks(src)))
+            m.addAction("Shuffle Play", lambda: self._shuffle_play(self._source_tracks(src)))
+            m.addSeparator()
         if d and d[0] == "playlist":
             pid = d[1]
             m.addAction("Rename…", lambda: self._rename_playlist(pid))
@@ -1207,6 +1249,7 @@ class MainWindow(PanelsMixin, QMainWindow):
             src, root, prefix = d[1]
             tr = lambda: self._folder_index(src).tracks(root, prefix)
             m.addAction("Play Folder", lambda: tr() and self.player.play_list(tr(), 0))
+            m.addAction("Shuffle Play Folder", lambda: self._shuffle_play(tr()))
             m.addAction("Queue Folder", lambda: self.player.enqueue(tr()))
         elif d and d[0] == "remote" and d[1] is not None:
             key = Config.server_lib_key(d[1]); on = self.cfg.lib_enabled(key)
@@ -1267,6 +1310,108 @@ class MainWindow(PanelsMixin, QMainWindow):
         self.db.set_playlist_tracks(pid, keep)
         sb = self.table.verticalScrollBar(); y = sb.value()
         self.load_source(keep=True); sb.setValue(y); self._sync_if_dirty()
+
+    def _select_all(self):
+        (self.album_view if self.cfg.list_mode == "albums" else self.table).setFocus()
+        self.table.selectAll()
+
+    def _source_tracks(self, src):
+        """The tracks of a playlist or auto playlist, in its order (without changing the view)."""
+        kind, arg = src
+        if kind == "smart":
+            return smart.evaluate(self._tracks(), self._smart_spec(arg))
+        if kind == "playlist":
+            return self._playlist_tracks(arg)
+        return []
+
+    def _shuffle_play(self, tracks):
+        """Play these tracks in a random order (whatever the Shuffle setting is)."""
+        tracks = [t for t in tracks if t.get("source") != "radio"] if tracks else []
+        if tracks:
+            self.player.play_list(random.sample(tracks, len(tracks)), 0)
+
+    def _delete_key(self):
+        """Delete in the track list does what it means where you are: leave the playlist, leave Now Playing,
+        or (in the library) remove from the library after asking. Nothing in history, radio or podcasts."""
+        kind = self.source[0]
+        if kind == "playlist":
+            rows = self._selected_rows()
+            if rows:
+                self._remove_from_playlist(rows)
+        elif kind == "queue":
+            self._remove_from_queue(self._selected())
+        elif kind in ("history", "radio", "podcast"):
+            return
+        else:
+            self._remove_from_library()
+
+    def _remove_from_library(self, tracks=None):
+        """Remove tracks from the library after asking. Files are never deleted; what is still in a music folder
+        or on the server comes back at the next rescan or sync."""
+        if not isinstance(tracks, list):
+            tracks = self._selected()
+        tracks = [t for t in tracks if t.get("source") in ("local", "remote")]
+        playing = (self.player.current or {}).get("id")
+        ids = [t["id"] for t in tracks if t["id"] != playing]
+        if not ids:
+            if tracks:
+                self.statusBar().showMessage("The playing track cannot be removed from the library", 5000)
+            return
+        note = (f"Remove {len(ids)} track{'s' if len(ids) != 1 else ''} from the library?\n\n"
+                "The files are not deleted. Tracks still in your music folders come back at the next rescan, "
+                "Navidrome tracks at the next sync.")
+        if playing in {t["id"] for t in tracks}:
+            note += "\n\nThe playing track is kept."
+        if QMessageBox.question(self, "Remove from Library", note) != QMessageBox.StandardButton.Yes:
+            return
+        gone = set(ids)
+        self.player.remove([i for i, q in enumerate(self.player.queue) if q.get("id") in gone])
+        self.db.delete_tracks(ids)
+        sb = self.table.verticalScrollBar(); y = sb.value()
+        self.refresh_playlists(); self.load_source(keep=True); sb.setValue(y)
+        self.statusBar().showMessage(f"Removed {len(ids)} track(s) from the library", 5000)
+
+    def _set_list_mode(self, mode, sort=True):
+        """Show the track list as Details (columns) or Album and Tracks (grouped by album with the cover)."""
+        mode = mode if mode in ("details", "albums") else "details"
+        self.cfg.list_mode = mode
+        (self.act_list_albums if mode == "albums" else self.act_list_details).setChecked(True)
+        self.act_list_toggle.setChecked(mode == "albums")
+        self.list_stack.setCurrentWidget(self.album_view if mode == "albums" else self.table)
+        hh = self.table.horizontalHeader()
+        sortable = sort and self.source[0] not in self._OWN_ORDER
+        if mode == "albums" and sortable and COLUMNS[hh.sortIndicatorSection()][1] not in ("album", "album_artist"):
+            self._details_sort = (hh.sortIndicatorSection(), hh.sortIndicatorOrder())   # given back on the way out
+            sec = next(i for i, c in enumerate(COLUMNS) if c[1] == "album_artist")   # albums together, in order
+            hh.setSortIndicator(sec, Qt.SortOrder.AscendingOrder)
+            self.model.sort_by("album_artist", False)
+        elif mode == "details" and sortable and getattr(self, "_details_sort", None):
+            sec, order = self._details_sort
+            hh.setSortIndicator(sec, order)
+            self.model.sort_by(COLUMNS[sec][1], order == Qt.SortOrder.DescendingOrder)
+        if mode == "details":
+            self._details_sort = None
+        cur = self.table.currentIndex()
+        if cur.isValid():
+            self._reveal_row(cur.row())
+
+    _OWN_ORDER = ("queue", "playlist", "smart", "folder", "radio", "history", "podcast")
+
+    def _about(self):
+        from .. import __version__, updater
+        try:
+            commit = (updater.local_version() or "")[:7]
+        except Exception:  # noqa: BLE001
+            commit = ""
+        from PyQt6.QtCore import PYQT_VERSION_STR, QT_VERSION_STR
+        engine = "GStreamer" if self.player.mp.engine == "gst" else "Qt Multimedia"
+        QMessageBox.about(self, "About Hivefi",
+                          f"<h3>Hivefi {__version__}</h3>"
+                          + (f"<p>Build {commit}</p>" if commit else "")
+                          + "<p>A music manager and player for Linux with Navidrome / Subsonic sync.</p>"
+                          f"<p>Audio engine: {engine}<br>Qt {QT_VERSION_STR} · PyQt {PYQT_VERSION_STR} · "
+                          f"Python {sys.version.split()[0]}</p>"
+                          f"<p>Library: {len(self.db.all_tracks())} tracks<br>Data folder: {data_dir()}</p>")
 
     def _remove_from_queue(self, tracks):
         """Remove these rows of the Now Playing view from the queue (found by identity: a track queued twice is
@@ -1694,6 +1839,7 @@ class MainWindow(PanelsMixin, QMainWindow):
     def _grid_menu(self, tracks, gpos):
         m = QMenu(self)
         m.addAction("Play Album", lambda: self.player.play_list(tracks, 0))
+        m.addAction("Shuffle Play", lambda: self._shuffle_play(tracks))
         m.addAction("Play Next", lambda: self.player.enqueue(tracks, next_=True))
         m.addAction("Queue Last", lambda: self.player.enqueue(tracks))
         pm = m.addMenu("Add to Playlist")
@@ -1717,7 +1863,13 @@ class MainWindow(PanelsMixin, QMainWindow):
         x = self.table.viewport().mapFromGlobal(QCursor.pos()).x() - self.table.columnViewportPosition(idx.column())
         sw = max(8, self.table.fontMetrics().horizontalAdvance("★"))
         star = 0 if x < 3 else min(5, (x - 3) // sw + 1)
-        self.set_rating([t], 0 if star == t["rating"] else star)
+        self._rate_row(idx.row(), star)
+
+    def _rate_row(self, row, star):
+        """A click on the stars of a row (clicking the current rating again clears it)."""
+        if 0 <= row < len(self.model.tracks):
+            t = self.model.tracks[row]
+            self.set_rating([t], 0 if star == t["rating"] else star)
 
     def _build_skin_menu(self):
         self.skin_menu.clear(); grp = QActionGroup(self)

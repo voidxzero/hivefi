@@ -88,6 +88,7 @@ class Config:
     header_columns: list = field(default_factory=list)   # the columns that state was saved with (new ones start hidden)
     skin: str = "Dark"
     view_mode: str = "browser"           # browser | albums
+    list_mode: str = "details"           # details | albums (the track list as Album and Tracks)
     show_tray: bool = True
     close_to_tray: bool = False
     write_ratings: bool = False          # also store star ratings in local files' tags
