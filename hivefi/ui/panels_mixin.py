@@ -56,9 +56,14 @@ class PanelsMixin:
         tb.addWidget(self.btn_shuffle); tb.addWidget(self.btn_repeat)
         # --- volume
         tv = self._make_toolbar("Volume", "tb_volume")
-        vol_icon = self.vol_icon = QLabel(); vol_icon.setPixmap(self._icon(S.SP_MediaVolume).pixmap(18, 18))
+        vol_icon = self.vol_icon = QLabel(); vol_icon.setToolTip("Mute / unmute")
+        vol_icon.setCursor(Qt.CursorShape.PointingHandCursor)
+        vol_icon.mousePressEvent = lambda e: e.button() == Qt.MouseButton.LeftButton and self._toggle_mute()
+        self._unmute_to = 0
         self.vol = QSlider(Qt.Orientation.Horizontal); self.vol.setRange(0, 100); self.vol.setFixedWidth(110)
         self.vol.setValue(self.cfg.volume); self.vol.valueChanged.connect(self._set_volume)
+        self.vol.valueChanged.connect(lambda _v: self._update_vol_icon())
+        self._update_vol_icon()
         tv.addWidget(vol_icon); tv.addWidget(self.vol)
         # --- search
         ts = self._make_toolbar("Search", "tb_search")
@@ -85,6 +90,18 @@ class PanelsMixin:
         for w in (self.lbl_pos, self.seek, self.lbl_dur):
             tk.addWidget(w)
         self._wave_token = 0
+
+    def _toggle_mute(self):
+        """Click the speaker: mute, click again: back to the volume it had."""
+        if self.vol.value() > 0:
+            self._unmute_to = self.vol.value(); self.vol.setValue(0)
+        else:
+            self.vol.setValue(self._unmute_to or 50)
+
+    def _update_vol_icon(self):
+        S = QStyle.StandardPixmap
+        self.vol_icon.setPixmap(self._icon(S.SP_MediaVolumeMuted if self.vol.value() == 0 else S.SP_MediaVolume)
+                                .pixmap(18, 18))
 
     def _make_worker(self, fn):
         from .main_window import Worker

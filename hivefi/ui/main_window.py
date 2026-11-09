@@ -314,6 +314,7 @@ class MainWindow(PanelsMixin, QMainWindow):
         self.dock_info.visibilityChanged.connect(lambda v: v and self._sel_changed())
         self.next_panel.jumpRequested.connect(self.player.jump)
         self.next_panel.removeRequested.connect(self.player.remove)
+        self.next_panel.moveRequested.connect(self.player.move)
         self.status_lbl = QLabel(""); self.statusBar().addWidget(self.status_lbl, 1)
         self.sync_lbl = QLabel(""); self.statusBar().addPermanentWidget(self.sync_lbl)
         self.btn_edit = QPushButton("✎ Edit layout"); self.btn_edit.setCheckable(True); self.btn_edit.setFlat(True)
@@ -344,6 +345,10 @@ class MainWindow(PanelsMixin, QMainWindow):
         p.addAction("Play/Pause", QKeySequence("Ctrl+Space"), self.player.toggle)
         p.addAction("Next", QKeySequence("Ctrl+Right"), self.player.next)
         p.addAction("Previous", QKeySequence("Ctrl+Left"), self.player.previous)
+        p.addAction("Stop", self.player.stop)
+        self.act_stop_after = p.addAction("Stop after Current"); self.act_stop_after.setCheckable(True)
+        self.act_stop_after.toggled.connect(self.player.set_stop_after_current)
+        self.player.stopAfterChanged.connect(self.act_stop_after.setChecked)
         p.addAction("Clear Queue", self.player.clear)
         p.addSeparator()
         sm = p.addMenu("Sleep Timer"); self.sleep_group = QActionGroup(self)
@@ -876,8 +881,12 @@ class MainWindow(PanelsMixin, QMainWindow):
     def _on_double(self, idx):
         if COLUMNS[idx.column()][1] == "rating":
             return
-        if self.source[0] == "queue":
-            self.player.jump(idx.row()); return
+        if self.source[0] == "queue":                         # the view may be searched: find the queue row
+            t = self.model.tracks[idx.row()]
+            qi = next((i for i, q in enumerate(self.player.queue) if q is t), None)
+            if qi is not None:
+                self.player.jump(qi)
+            return
         self.player.play_list(self._visible_tracks(), idx.row())
 
     def _play_selected(self):
@@ -1110,6 +1119,8 @@ class MainWindow(PanelsMixin, QMainWindow):
             pm.addAction(p["name"], lambda p=p: self._add_to_playlist(p["id"], sel))
         if self.source[0] == "playlist":
             m.addAction("Remove from Playlist", lambda: self._remove_from_playlist(sel))
+        if self.source[0] == "queue":
+            m.addAction("Remove from Now Playing", lambda: self._remove_from_queue(sel))
         local = [t for t in sel if t["source"] == "local"]
         if local:
             m.addSeparator()
@@ -1211,6 +1222,12 @@ class MainWindow(PanelsMixin, QMainWindow):
         pid = self.source[1]; ids = {t["id"] for t in tracks}
         self.db.set_playlist_tracks(pid, [t["id"] for t in self.db.playlist_tracks(pid) if t["id"] not in ids])
         self.load_source(); self._sync_if_dirty()
+
+    def _remove_from_queue(self, tracks):
+        """Remove these rows of the Now Playing view from the queue (found by identity: a track queued twice is
+        only removed where it was selected; the playing track stays)."""
+        ids = {id(t) for t in tracks}
+        self.player.remove([i for i, q in enumerate(self.player.queue) if id(q) in ids])
 
     def _rename_playlist(self, pid):
         cur = next(p for p in self.db.playlists() if p["id"] == pid)
@@ -1591,11 +1608,13 @@ class MainWindow(PanelsMixin, QMainWindow):
 
     def _refresh_next(self):
         if self.dock_next.isVisible():
-            self.next_panel.refresh(self.player.queue, self.player.index)
+            self.next_panel.refresh(self.player.queue, self.player.index, self.player.upcoming())
 
     def _on_queue_changed(self):
         self._refresh_next()
-        if self.source[0] == "queue": self.load_source()
+        if self.source[0] == "queue":
+            sb = self.table.verticalScrollBar(); y = sb.value()
+            self.load_source(keep=True); sb.setValue(y)
 
     def _sel_changed(self):
         if self.dock_info.isVisible():
@@ -1729,7 +1748,7 @@ class MainWindow(PanelsMixin, QMainWindow):
     def _apply_skin_visuals(self):
         if self.edit_mode:
             self._style_edit_mode(True)                          # the dashed frame follows the skin's accent
-        self.vol_icon.setPixmap(self._icon(QStyle.StandardPixmap.SP_MediaVolume).pixmap(18, 18))   # a QLabel: repaint
+        self._update_vol_icon()                                  # a QLabel: repaint in the new skin's colours
         self.model.playing_color = self.skin_tokens["accent"]
         self.model.set_playing(self.model.playing_id)
         self.grid.set_placeholder_color(QColor(self.skin_tokens["button"]))

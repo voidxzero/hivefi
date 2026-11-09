@@ -1,5 +1,6 @@
 """Playback engine front-end: queue, shuffle, repeat, gapless look-ahead, scrobble detection."""
 import random
+from bisect import bisect_left
 
 from PyQt6.QtCore import QObject, QUrl, pyqtSignal
 from PyQt6.QtMultimedia import QMediaPlayer
@@ -29,6 +30,7 @@ class Player(QObject):
     notice = pyqtSignal(str)
     skipped = pyqtSignal(object)             # the track was skipped (user moved on in its first quarter)
     streamTitle = pyqtSignal(str)            # "Artist - Title" announced by an internet radio stream
+    stopAfterChanged = pyqtSignal(bool)      # "Stop after current" was switched on or off (it is one-shot)
 
     def __init__(self, url_resolver, cfg, parent=None):
         super().__init__(parent)
@@ -46,6 +48,7 @@ class Player(QObject):
         self._order: list[int] = []           # play order (indices into queue)
         self._counted = False
         self._in_update = False
+        self.stop_after_current = False       # one-shot: stop when the playing track ends
         self.mp.positionChanged.connect(self._on_pos)
         self.mp.durationChanged.connect(lambda d: self.durationChanged.emit(int(d)))
         self.mp.playbackStateChanged.connect(
@@ -104,7 +107,8 @@ class Player(QObject):
         self._reorder()
         self.queueChanged.emit()
         t = self.queue[index]
-        self._counted = position_ms > 0
+        dur = int((t.get("duration") or 0) * 1000)
+        self._counted = bool(dur) and position_ms >= min(dur / 2, 240_000)   # counted before we quit
         self._apply_volume()
         self.mp.setSource(self.resolve(t))
         self.trackChanged.emit(t)
@@ -119,20 +123,69 @@ class Player(QObject):
                 self.positionChanged.emit(position_ms)
         self._update_next()
 
-    def enqueue(self, tracks, next_=False):
-        if next_ and self.index >= 0:
-            at = self.index + 1
-            self.queue[at:at] = list(tracks)
-        else:
+    def _order_pos(self):
+        return self._order.index(self.index) if self.index in self._order else -1
+
+    def _insert(self, tracks, next_=False):
+        """Put tracks into the queue without reshuffling what is already lined up: "Play Next" tracks come
+        straight after the current one (in shuffle too), others join the upcoming shuffle at random places."""
+        tracks = list(tracks)
+        if not tracks:
+            return
+        n = len(tracks)
+        if self.index < 0:                                   # nothing playing: a fresh order
             self.queue.extend(tracks)
-        cur = self.index
-        self._reorder()
-        self.index = cur
+            self._reorder()
+            return
+        if next_:
+            at = self.index + 1
+            self.queue[at:at] = tracks
+            self._order = [i + n if i >= at else i for i in self._order]
+        else:
+            at = len(self.queue)
+            self.queue.extend(tracks)
+        new = list(range(at, at + n))
+        if not self.shuffle:
+            self._order = list(range(len(self.queue)))
+        elif next_:
+            pos = self._order_pos() + 1
+            self._order[pos:pos] = new
+        else:
+            lo = self._order_pos() + 1
+            for i in new:
+                self._order.insert(random.randint(lo, len(self._order)), i)
+
+    def enqueue(self, tracks, next_=False):
+        idle = self.index < 0
+        self._insert(tracks, next_)
         self.queueChanged.emit()
-        if self.index < 0 and self.queue:
-            self._load(0)
+        if idle and self.queue:
+            self._load(self._order[0] if self._order else 0)
         else:
             self._update_next()
+
+    def move(self, rows, before):
+        """Drag and drop in Up Next: move the queue rows `rows` so they play right before queue row `before`
+        (None = at the end). With shuffle on it is the play order that changes, otherwise the queue itself."""
+        moved = sorted({r for r in rows if 0 <= r < len(self.queue)}, key=self._order.index)
+        if not moved or before in moved:
+            return
+        rest = [i for i in self._order if i not in set(moved)]
+        at = rest.index(before) if before in rest else len(rest)
+        seq = rest[:at] + moved + rest[at:]
+        if self.shuffle:
+            self._order = seq
+        else:
+            self.queue = [self.queue[i] for i in seq]
+            if self.index >= 0:
+                self.index = seq.index(self.index)
+            self._order = list(range(len(self.queue)))
+        self.queueChanged.emit()
+        self._update_next()
+
+    def upcoming(self):
+        """Queue rows in the order they will play (the shuffle order when shuffling)."""
+        return list(self._order) if len(self._order) == len(self.queue) else list(range(len(self.queue)))
 
     def remove(self, rows):
         """Remove queued tracks by queue row (the currently playing row is kept)."""
@@ -143,7 +196,8 @@ class Player(QObject):
         for r in reversed(rows):
             del self.queue[r]
         self.index -= before
-        self._reorder()
+        gone = set(rows)                                       # keep the play order of what is left
+        self._order = [i - bisect_left(rows, i) for i in self._order if i not in gone]
         self.queueChanged.emit()
         self._update_next()
 
@@ -180,10 +234,7 @@ class Player(QObject):
         if i is None and self.auto_dj:
             more = self.auto_dj()
             if more:
-                cur = self.index
-                self.queue.extend(more)
-                self._reorder()
-                self.index = cur
+                self._insert(more)
                 self.queueChanged.emit()
                 i = self._step(1)
         return i
@@ -193,7 +244,7 @@ class Player(QObject):
             return
         self._in_update = True
         try:
-            self._next_idx = self._peek_next()
+            self._next_idx = None if self.stop_after_current else self._peek_next()
             if self._next_idx is None:
                 self.mp.set_next(None)
                 return
@@ -229,6 +280,10 @@ class Player(QObject):
             self._load(0)
 
     def stop(self): self.mp.stop()
+
+    def set_stop_after_current(self, on):
+        self.stop_after_current = bool(on)
+        self._update_next()                                   # no gapless hand-over to the next track
     def seek(self, ms): self.mp.setPosition(ms)
 
     def set_volume(self, v):
@@ -251,8 +306,9 @@ class Player(QObject):
         if 0 <= n < len(self._order):
             return self._order[n]
         if self.repeat == "all":
-            if self.shuffle and d > 0:
+            if self.shuffle and d > 0:                       # a new round: reshuffle (current track first)
                 self._reorder()
+                return self._order[1 if len(self._order) > 1 else 0]
             return self._order[n % len(self._order)]
         return None
 
@@ -289,6 +345,8 @@ class Player(QObject):
         if i is not None:
             self._note_skip()
             self._load(i, manual=True)
+        else:
+            self.mp.setPosition(0)                            # first track: start it again
 
     # --- internals
     def _on_pos(self, ms):
@@ -302,7 +360,12 @@ class Player(QObject):
 
     def _on_status(self, st):
         if st == QMediaPlayer.MediaStatus.EndOfMedia:
-            if self.repeat == "one":
+            if self.stop_after_current:
+                self.stop_after_current = False
+                self.mp.stop()
+                self.stopAfterChanged.emit(False)
+                self._update_next()
+            elif self.repeat == "one":
                 self._load(self.index)
             else:
                 self.next(manual=False)

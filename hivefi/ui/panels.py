@@ -137,47 +137,89 @@ class NowPlayingPanel(QWidget):
         super().changeEvent(e)
 
 
-class UpNextPanel(QWidget):
-    jumpRequested = pyqtSignal(int)
-    removeRequested = pyqtSignal(list)
+class _QueueList(QListWidget):
+    """The Up Next list: rows can be dragged to a new place; the drop is reported, the panel is then rebuilt."""
+    dropped = pyqtSignal(list, int)            # display rows moved, display row to put them before (-1 = end)
 
     def __init__(self):
         super().__init__()
-        self.offset = 0
-        self.list = QListWidget()
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+
+    def dropEvent(self, e):
+        rows = sorted(self.row(i) for i in self.selectedItems())
+        it = self.itemAt(e.position().toPoint())
+        if it is None:
+            target = -1
+        else:
+            target = self.row(it)
+            if e.position().y() > self.visualItemRect(it).center().y():
+                target += 1
+        e.setDropAction(Qt.DropAction.IgnoreAction); e.accept()       # the panel rebuilds from the new queue
+        if rows:
+            self.dropped.emit(rows, target)
+
+
+class UpNextPanel(QWidget):
+    jumpRequested = pyqtSignal(int)            # queue row
+    removeRequested = pyqtSignal(list)         # queue rows
+    moveRequested = pyqtSignal(list, object)   # queue rows, queue row to play them before (None = at the end)
+
+    def __init__(self):
+        super().__init__()
+        self.rows: list[int] = []              # queue row of each list item (the list shows the play order)
+        self.after: int | None = None          # queue row right after the shown window (None = the window ends the queue)
+        self.list = _QueueList()
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.list.itemDoubleClicked.connect(lambda it: self.jumpRequested.emit(self.offset + self.list.row(it)))
-        self.hint = QLabel("Double-click to jump · Delete removes"); self.hint.setStyleSheet("opacity:.6")
+        self.list.itemDoubleClicked.connect(self._double)
+        self.list.dropped.connect(self._dropped)
+        self.hint = QLabel("Double-click to jump · drag to reorder · Delete removes"); self.hint.setStyleSheet("opacity:.6")
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.list); lay.addWidget(self.hint)
 
+    def _double(self, it):
+        r = self.list.row(it)
+        if 0 <= r < len(self.rows):
+            self.jumpRequested.emit(self.rows[r])
+
+    def _dropped(self, rows, target):
+        moved = [self.rows[r] for r in rows if 0 <= r < len(self.rows)]
+        before = self.rows[target] if 0 <= target < len(self.rows) else self.after
+        if moved:
+            self.moveRequested.emit(moved, before)
+
     def keyPressEvent(self, e):
         if e.key() == Qt.Key.Key_Delete:
-            self.removeRequested.emit([self.offset + self.list.row(i) for i in self.list.selectedItems()])
+            rows = [self.rows[r] for r in (self.list.row(i) for i in self.list.selectedItems()) if 0 <= r < len(self.rows)]
+            self.removeRequested.emit(rows)
         else:
             super().keyPressEvent(e)
 
     WINDOW_BEFORE, WINDOW_AFTER = 30, 570
 
-    def refresh(self, queue, index):
-        """Show a window of the queue around the current track: a 60,000-track queue must not mean 60,000
-        list items rebuilt on every track change."""
-        self.offset = start = max(0, index - self.WINDOW_BEFORE)
-        end = min(len(queue), start + self.WINDOW_BEFORE + self.WINDOW_AFTER)
+    def refresh(self, queue, index, order=None):
+        """Show a window of the play order around the current track: a 60,000-track queue must not mean 60,000
+        list items rebuilt on every track change. `order` is the play order (queue rows); default the queue order."""
+        order = order if order is not None and len(order) == len(queue) else list(range(len(queue)))
+        pos = order.index(index) if index in order else 0
+        start = max(0, pos - self.WINDOW_BEFORE)
+        end = min(len(order), start + self.WINDOW_BEFORE + self.WINDOW_AFTER)
+        self.rows = order[start:end]
+        self.after = order[end] if end < len(order) else None
         self.list.setUpdatesEnabled(False)
         self.list.clear()
-        for i in range(start, end):
+        for i in self.rows:
             t = queue[i]
             it = QListWidgetItem(f'{"▶ " if i == index else ""}{t["artist"]} – {t["title"]}   {fmt_time(t["duration"])}')
             if i == index:
                 f = it.font(); f.setBold(True); it.setFont(f)
             self.list.addItem(it)
-        if len(queue) > end:
-            more = QListWidgetItem(f"… and {len(queue) - end} more"); more.setFlags(Qt.ItemFlag.NoItemFlags)
+        if len(order) > end:
+            more = QListWidgetItem(f"… and {len(order) - end} more"); more.setFlags(Qt.ItemFlag.NoItemFlags)
             self.list.addItem(more)
         self.list.setUpdatesEnabled(True)
-        if 0 <= index - start < self.list.count():
-            self.list.scrollToItem(self.list.item(index - start))
+        if index in self.rows:
+            self.list.scrollToItem(self.list.item(self.rows.index(index)))
 
 
 class LyricsPanel(QWidget):
