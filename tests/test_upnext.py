@@ -61,3 +61,32 @@ def test_double_click_in_a_searched_now_playing_view(win):
     n = len(w.player.queue); cur = w.player.current
     w._remove_from_queue([w.player.queue[0], cur]); wait(50)
     assert len(w.player.queue) == n - 1 and w.player.current is cur and w.model.rowCount() == n - 1
+
+
+def test_playback_menu_commands_and_playlist_duplicates(win):
+    w = win
+    acts = {a.text(): a for a in w.shortcut_actions.values()}
+    for name, keys in (("Volume Up", "Ctrl+Up"), ("Mute / Unmute", "Ctrl+Shift+M"), ("Shuffle", "Ctrl+H"),
+                       ("Seek Forward 10 s", "Ctrl+Shift+Right"), ("★★★", "Ctrl+3")):
+        assert acts[name].shortcut().toString() == keys            # listed in Preferences → Hotkeys too
+    w.vol.setValue(50); acts["Volume Up"].trigger(); assert w.vol.value() == 55 and w.cfg.volume == 55
+    acts["Volume Down"].trigger(); acts["Volume Down"].trigger(); assert w.vol.value() == 45
+    on = w.btn_shuffle.isChecked()
+    acts["Shuffle"].trigger(); assert w.btn_shuffle.isChecked() != on and w.player.shuffle != on
+    w.btn_shuffle.setChecked(on); assert acts["Shuffle"].isChecked() == on
+    rep = w.player.repeat; acts["Repeat (Off / All / One)"].trigger(); assert w.player.repeat != rep
+    q = w.db.all_tracks("remote")
+    w.player.play_list(q, 0); wait(300)
+    acts["★★★"].trigger(); assert w.db.track(q[0]["id"])["rating"] == 3
+    seeks = []; w.player.seek = seeks.append
+    w.player.mp.position = lambda: 5_000; w.player.mp.duration = lambda: 60_000
+    w._seek_by(10_000); w._seek_by(-10_000); w.player.mp.position = lambda: 55_000; w._seek_by(10_000)
+    assert seeks == [15_000, 0, 59_500]                             # never before the start or past the end
+    # Remove from Playlist takes away the selected copy only
+    a, b = q[0]["id"], q[1]["id"]
+    pid = w.db.create_playlist("dupes"); w.db.set_playlist_tracks(pid, [a, b, a, b])
+    w.refresh_playlists(); w.source = ("playlist", pid); w.load_source()
+    w._remove_from_playlist([2])                                    # the second copy of `a`
+    assert [t["id"] for t in w.db.playlist_tracks(pid)] == [a, b, b]
+    w._remove_from_playlist([0, 2])
+    assert [t["id"] for t in w.db.playlist_tracks(pid)] == [b]

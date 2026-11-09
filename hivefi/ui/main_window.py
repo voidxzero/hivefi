@@ -351,6 +351,21 @@ class MainWindow(PanelsMixin, QMainWindow):
         self.player.stopAfterChanged.connect(self.act_stop_after.setChecked)
         p.addAction("Clear Queue", self.player.clear)
         p.addSeparator()
+        self.act_shuffle = p.addAction("Shuffle", QKeySequence("Ctrl+H")); self.act_shuffle.setCheckable(True)
+        self.act_shuffle.setChecked(self.cfg.shuffle)
+        self.act_shuffle.toggled.connect(self.btn_shuffle.setChecked)          # the button does the work
+        self.btn_shuffle.toggled.connect(self.act_shuffle.setChecked)
+        p.addAction("Repeat (Off / All / One)", QKeySequence("Ctrl+R"), self._cycle_repeat)
+        p.addAction("Volume Up", QKeySequence("Ctrl+Up"), lambda: self.vol.setValue(min(100, self.vol.value() + 5)))
+        p.addAction("Volume Down", QKeySequence("Ctrl+Down"), lambda: self.vol.setValue(max(0, self.vol.value() - 5)))
+        p.addAction("Mute / Unmute", QKeySequence("Ctrl+Shift+M"), self._toggle_mute)
+        p.addAction("Seek Forward 10 s", QKeySequence("Ctrl+Shift+Right"), lambda: self._seek_by(10_000))
+        p.addAction("Seek Back 10 s", QKeySequence("Ctrl+Shift+Left"), lambda: self._seek_by(-10_000))
+        rp = p.addMenu("Rate Playing Track")
+        for r in range(6):
+            rp.addAction("★" * r if r else "No rating", QKeySequence(f"Ctrl+{r}"),
+                         lambda r=r: self.player.current and self.set_rating([self.player.current], r))
+        p.addSeparator()
         sm = p.addMenu("Sleep Timer"); self.sleep_group = QActionGroup(self)
         for label, mins in (("Off", 0), ("15 minutes", 15), ("30 minutes", 30), ("45 minutes", 45),
                             ("1 hour", 60), ("90 minutes", 90)):
@@ -871,6 +886,12 @@ class MainWindow(PanelsMixin, QMainWindow):
     def _visible_tracks(self):
         return list(self.model.tracks)
 
+    def _selected_rows(self):
+        rows = set()
+        for r in self.table.selectionModel().selection():
+            rows.update(range(r.top(), r.bottom() + 1))
+        return sorted(i for i in rows if i < len(self.model.tracks))
+
     def _selected(self):
         rows = set()
         for r in self.table.selectionModel().selection():       # ranges, not one QModelIndex per row
@@ -921,6 +942,15 @@ class MainWindow(PanelsMixin, QMainWindow):
 
     def _on_dur(self, ms):
         self.seek.setRange(0, ms); self.lbl_dur.setText(fmt_time(ms / 1000))
+
+    def _seek_by(self, ms):
+        """Jump forwards or backwards in the playing track (not in live streams)."""
+        t = self.player.current
+        if not t or t.get("source") == "radio":
+            return
+        dur = self.player.mp.duration() or int((t.get("duration") or 0) * 1000)
+        pos = max(0, self.player.mp.position() + ms)
+        self.player.seek(min(pos, max(0, dur - 500)) if dur else pos)
 
     def _set_volume(self, v): self.cfg.volume = v; self.player.set_volume(v)
     def _set_shuffle(self, v): self.cfg.shuffle = v; self.player.set_shuffle(v)
@@ -1118,7 +1148,8 @@ class MainWindow(PanelsMixin, QMainWindow):
         for p in self.db.playlists():
             pm.addAction(p["name"], lambda p=p: self._add_to_playlist(p["id"], sel))
         if self.source[0] == "playlist":
-            m.addAction("Remove from Playlist", lambda: self._remove_from_playlist(sel))
+            rows = self._selected_rows()
+            m.addAction("Remove from Playlist", lambda: self._remove_from_playlist(rows))
         if self.source[0] == "queue":
             m.addAction("Remove from Now Playing", lambda: self._remove_from_queue(sel))
         local = [t for t in sel if t["source"] == "local"]
@@ -1218,10 +1249,24 @@ class MainWindow(PanelsMixin, QMainWindow):
         self.statusBar().showMessage(f"Added {len(tracks)} track(s)", 3000)
         self._sync_if_dirty()
 
-    def _remove_from_playlist(self, tracks):
-        pid = self.source[1]; ids = {t["id"] for t in tracks}
-        self.db.set_playlist_tracks(pid, [t["id"] for t in self.db.playlist_tracks(pid) if t["id"] not in ids])
-        self.load_source(); self._sync_if_dirty()
+    def _remove_from_playlist(self, rows):
+        """Remove these rows of the playlist view. A track that is in the playlist twice is the same object
+        twice, so each row is matched by occurrence: the 2nd copy in the view is the 2nd copy in the playlist (a
+        playlist keeps its own order, and searches or disabled libraries hide every copy of a track alike)."""
+        pid = self.source[1]; view = self.model.tracks
+        drop = set()                                              # (track id, occurrence)
+        for r in rows:
+            if 0 <= r < len(view):
+                tid = view[r]["id"]
+                drop.add((tid, sum(1 for t in view[:r] if t["id"] == tid)))
+        seen, keep = {}, []
+        for t in self.db.playlist_tracks(pid):
+            k = seen.get(t["id"], 0); seen[t["id"]] = k + 1
+            if (t["id"], k) not in drop:
+                keep.append(t["id"])
+        self.db.set_playlist_tracks(pid, keep)
+        sb = self.table.verticalScrollBar(); y = sb.value()
+        self.load_source(keep=True); sb.setValue(y); self._sync_if_dirty()
 
     def _remove_from_queue(self, tracks):
         """Remove these rows of the Now Playing view from the queue (found by identity: a track queued twice is
