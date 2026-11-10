@@ -265,7 +265,39 @@ class Starfield(Effect):
                 p.setBrush(c); p.drawEllipse(QPointF(x, y), r, r)
 
 
-CLASSIC = [Bars, Scope, Ambience, Battery, Particles, Spikes, Starfield]
+class WireVortex(Effect):
+    """A 3D wireframe whirlpool: rings of a mesh that spiral into the screen, raised by the spectrum."""
+    name = "Wireframe Vortex"
+    soft = True
+
+    def paint(self, p, w, h, a):
+        cx, cy = w / 2, h * 0.52
+        rings, seg = 16, 72
+        spin = a.t * 0.35
+        scale = min(w, h) * 0.95
+        grid = []
+        for r in range(1, rings + 1):
+            f = r / rings
+            rad = (f ** 1.6) * scale * 0.85
+            row = []
+            for k in range(seg):
+                ang = k / seg * 6.2832 + spin + f * 2.4
+                v = a.bars[(k * Audio.N // seg + r * 3) % Audio.N]
+                z = (v * 0.7 + a.bass * 0.3) * scale * 0.12 * (0.3 + f)
+                row.append(QPointF(cx + math.cos(ang) * rad, cy + math.sin(ang) * rad * 0.42 - z))
+            grid.append(row)
+        pen_w = max(1.0, w / 640)
+        for r, row in enumerate(grid):
+            f = (r + 1) / rings
+            p.setPen(QPen(QColor(int(70 + 90 * f), int(170 + 70 * f), int(210 - 40 * f), int(90 + 150 * f)), pen_w))
+            p.drawPolygon(QPolygonF(row))
+            if r:
+                prev = grid[r - 1]
+                for k in range(0, seg, 2):
+                    p.drawLine(prev[k], row[k])
+
+
+CLASSIC = [Bars, Scope, Ambience, Battery, Particles, Spikes, Starfield, WireVortex]
 
 
 # ======================================================================================= feedback ("MilkDrop-style")
@@ -514,7 +546,95 @@ class EchoChamber(MilkEffect):
             p.drawRect(QRectF(w / 2 + i * bw, h / 2 - v * h * 0.3, bw - 1, v * h * 0.6))
 
 
-MILK = [TunnelVision, SpiralGalaxy, LiquidGold, NeonRain, KaleidoPulse, DeepSea, Fireworks, EchoChamber]
+class NeonFlow(MilkEffect):
+    """Swirling liquid colour with long straight rays shooting out on every beat."""
+    name = "Neon Flow"
+
+    def motion(self, t, a):
+        return dict(zoom=1.0 + 0.006 + 0.01 * a.bass, rot=0.012 * math.sin(t * 0.4) + 0.004, ripple=0.035 + 0.03 * a.mid,
+                    freq=5.0, decay=0.968, hue=(0.012, -0.006, 0.01))
+
+    def shapes(self, p, w, h, t, a):
+        pts = a.wave(90)
+        for off, col in ((0.0, QColor(210, 90, 255, 200)), (0.12, QColor(235, 215, 80, 200)), (-0.12, QColor(90, 235, 140, 160))):
+            poly = QPolygonF([QPointF(i / 89 * w, h * (0.5 + off) + v * h * 0.18) for i, v in enumerate(pts)])
+            p.setPen(QPen(col, 2)); p.drawPolyline(poly)
+        if a.beat:
+            for _ in range(6):
+                ang = random.uniform(0, 6.2832); r = max(w, h)
+                p.setPen(QPen(QColor(230, 210, 90, 220), random.uniform(1.5, 4)))
+                p.drawLine(QPointF(w / 2, h / 2), QPointF(w / 2 + math.cos(ang) * r, h / 2 + math.sin(ang) * r))
+
+
+class PlasmaTunnel(MilkEffect):
+    """Flying down a glowing, colour-shifting tunnel lined with blobs, with a white burst in the middle."""
+    name = "Plasma Tunnel"
+
+    def motion(self, t, a):
+        return dict(zoom=1.03 + 0.02 * a.bass, rot=0.015, ripple=0.012, freq=6.0, decay=0.95, hue=(0.03, -0.02, 0.025))
+
+    def shapes(self, p, w, h, t, a):
+        cx, cy = w / 2, h / 2
+        for i in range(10):
+            ang = t * 0.6 + i / 10 * 6.2832
+            r = min(w, h) * (0.12 + 0.18 * a.bars[(i * 5) % Audio.N])
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(hsv(i / 10 + t * 0.07, 0.75, 1.0, 190))
+            p.drawEllipse(QPointF(cx + math.cos(ang) * r * 2, cy + math.sin(ang) * r * 1.3), r * 0.35, r * 0.2)
+        g = QRadialGradient(QPointF(cx, cy), min(w, h) * (0.06 + 0.1 * a.bass))
+        g.setColorAt(0, QColor(255, 255, 255, 255)); g.setColorAt(1, QColor(255, 255, 255, 0))
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(g)); p.drawEllipse(QPointF(cx, cy), min(w, h) * 0.2, min(w, h) * 0.2)
+
+
+class VioletRibbons(MilkEffect):
+    """Pink ribbons curling over deep purple, smeared into folds."""
+    name = "Violet Ribbons"
+
+    def motion(self, t, a):
+        return dict(zoom=0.995 + 0.01 * a.bass, rot=0.008 * math.sin(t * 0.3), dx=0.004 * math.sin(t), ripple=0.03 + 0.03 * a.mid,
+                    freq=3.5, decay=0.94, hue=(-0.004, -0.01, 0.006))
+
+    def shapes(self, p, w, h, t, a):
+        pts = a.wave(80)
+        for k in range(5):
+            poly = QPolygonF([QPointF(i / 79 * w, h * (0.35 + 0.08 * k) + (v + math.sin(i * 0.2 + t + k)) * h * 0.1)
+                              for i, v in enumerate(pts)])
+            p.setPen(QPen(QColor(255, 80 + 20 * k, 220, 210), 2)); p.drawPolyline(poly)
+
+
+class CrimsonRift(MilkEffect):
+    """A mirrored, segmented tunnel in hot pink and teal with a white core and branching veins."""
+    name = "Crimson Rift"
+    mirror = True
+
+    def motion(self, t, a):
+        return dict(zoom=1.025 + 0.025 * a.bass, rot=0.01 + (0.06 if a.beat else 0.0), ripple=0.02 + 0.02 * a.treb,
+                    freq=7.0, decay=0.955, hue=(0.0, 0.004, -0.003))
+
+    def shapes(self, p, w, h, t, a):
+        cx, cy = w / 2, h / 2
+        n = 14
+        for i in range(n):                                       # pink wedges of a ring that the zoom pulls outward
+            v = a.bars[(i * 4) % Audio.N]
+            r0 = min(w, h) * (0.08 + 0.05 * v)
+            r1 = r0 + min(w, h) * (0.05 + 0.1 * v)
+            a0 = t * 0.5 + i / n * 6.2832
+            a1 = a0 + 6.2832 / n * 0.62
+            path = QPolygonF([QPointF(cx + math.cos(a) * r, cy + math.sin(a) * r)
+                              for a, r in ((a0, r0), (a1, r0), (a1, r1), (a0, r1))])
+            p.setPen(QPen(QColor(255, 120, 200, 220), 1.5)); p.setBrush(QColor(235, 20, 120, 210)); p.drawPolygon(path)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        for _ in range(3 + (4 if a.beat else 0)):                # teal veins branching from the centre
+            ang = random.uniform(0, 6.2832); r = random.uniform(0.1, 0.35) * min(w, h)
+            x, y = cx + math.cos(ang) * r, cy + math.sin(ang) * r
+            p.setPen(QPen(QColor(60, 200, 190, 200), random.uniform(1, 3)))
+            p.drawLine(QPointF(cx, cy), QPointF(x, y))
+        g = QRadialGradient(QPointF(cx, cy), min(w, h) * (0.07 + 0.08 * a.bass))
+        g.setColorAt(0, QColor(255, 255, 255, 255)); g.setColorAt(1, QColor(255, 255, 255, 0))
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(g)); p.drawEllipse(QPointF(cx, cy), min(w, h) * 0.16, min(w, h) * 0.16)
+
+
+MILK = [TunnelVision, SpiralGalaxy, LiquidGold, NeonRain, KaleidoPulse, DeepSea, Fireworks, EchoChamber,
+        NeonFlow, PlasmaTunnel, VioletRibbons, CrimsonRift]
 QUALITY = {"low": 320, "medium": 480, "high": 720}
 
 

@@ -52,13 +52,17 @@ class _Delegate(QStyledItemDelegate):
             pm = icon.pixmap(PIC * 2, PIC * 2)
             side = min(pm.width(), pm.height())
             p.drawPixmap(pic, pm, QRect((pm.width() - side) // 2, (pm.height() - side) // 2, side, side))
+        else:                                             # no picture (yet): a note, two for All Artists
+            g = QFont(option.font); g.setPixelSize(PIC // 2); p.setFont(g)
+            c = QColor(option.palette.text().color()); c.setAlpha(70); p.setPen(c)
+            p.drawText(pic, Qt.AlignmentFlag.AlignCenter, "♫" if index.data(KEY) is None else "♪")
         p.setClipping(False)
         tx = pic.right() + 12
         w = r.right() - tx - 6
         name = index.data(Qt.ItemDataRole.DisplayRole) or ""
         sub = index.data(COUNT) or ""
-        f = QFont(option.font); fm = p.fontMetrics()
-        p.setPen(option.palette.text().color()); p.setFont(f)
+        f = QFont(option.font); p.setFont(f); fm = p.fontMetrics()
+        p.setPen(option.palette.text().color())
         p.drawText(QRect(tx, r.y() + 14, w, 20), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                    fm.elidedText(name, Qt.TextElideMode.ElideRight, w))
         small = QFont(f); small.setPointSizeF(max(7.0, f.pointSizeF() - 1.5)); p.setFont(small)

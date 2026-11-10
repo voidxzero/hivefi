@@ -390,6 +390,7 @@ class PanelsMixin:
 
     def _apply_layout_snapshot(self, snap):
         self.restoreState(_unb64(snap["state"]), STATE_VERSION)
+        self._place_window_toolbar()
         self._apply_edit_state()                                      # restoreState resets dock features
         self._apply_splits(self.browser_split, snap.get("browser", ""))
 
@@ -419,6 +420,7 @@ class PanelsMixin:
 
     def _apply_builtin_layout(self, name):
         self.restoreState(self._default_state, STATE_VERSION)
+        self._place_window_toolbar()
         docks = (self.dock_artists, self.dock_sources, self.dock_browser, self.dock_tracks, self.dock_np, self.dock_next,
                  self.dock_lyrics, self.dock_info, self.dock_eq, self.dock_vis)
         show = {"Default": (self.dock_artists, self.dock_sources, self.dock_browser, self.dock_tracks),
@@ -514,6 +516,9 @@ class PanelsMixin:
         """Show a saved view (a tab or the last session): source, search, browser, sort, view modes, selection and
         scroll position. Always ends in a loaded track list; a source that no longer exists falls back to All Music."""
         from .models import COLUMNS
+        self._show_page(s.get("page"))                           # a Visualizer / Now Playing tab covers the library
+        if s.get("page"):
+            return
         self._search_timer.stop()
         if getattr(self, "_grid_timer", None):
             self._grid_timer.stop()

@@ -26,8 +26,8 @@ class AlbumTracksView(QAbstractScrollArea):
     contextMenu = pyqtSignal(QPoint)            # global position of a right-click on a row
     ratingClicked = pyqtSignal(int, int)        # row, stars (0..5) clicked in the rating column
 
-    ART = 140
-    LEFT = 164                                   # width of the cover column
+    ART_FULL, ART_SMALL = 140, 84
+    COMPACT_BELOW = 520                          # narrower than this (a side panel): small cover, no rating column
     ROW = 22
     HEAD = 30                                    # album title line
     GAP = 12
@@ -52,12 +52,21 @@ class AlbumTracksView(QAbstractScrollArea):
         self.verticalScrollBar().setSingleStep(self.ROW)
         self.verticalScrollBar().valueChanged.connect(lambda _v: (self.viewport().update(), self._art_timer.start()))
         self._stale = True
+        self._compact = False
         model.modelReset.connect(self._model_reset)
         model.dataChanged.connect(lambda *_: self.viewport().update())
         selection_model.selectionChanged.connect(lambda *_: self.viewport().update())
         selection_model.currentChanged.connect(self._current_changed)
 
     # ------------------------------------------------------------------ layout
+    @property
+    def ART(self):
+        return self.ART_SMALL if self._compact else self.ART_FULL
+
+    @property
+    def LEFT(self):                              # width of the cover column
+        return self.ART + 24
+
     def _left_height(self):
         return self.ART + 2 * BORDER + 8
 
@@ -105,7 +114,16 @@ class AlbumTracksView(QAbstractScrollArea):
         sb.setRange(0, max(0, self.total - self.viewport().height()))
 
     def resizeEvent(self, e):
-        super().resizeEvent(e); self._update_scroll(); self._art_timer.start()
+        super().resizeEvent(e)
+        compact = self.viewport().width() < self.COMPACT_BELOW
+        if compact != self._compact:
+            self._compact = compact
+            if not self._stale:
+                top = self.top_row()
+                self._regroup()                               # block heights depend on the cover size
+                if top is not None:
+                    self.verticalScrollBar().setValue(self.verticalScrollBar().value() + self.row_rect(top).top())
+        self._update_scroll(); self._art_timer.start()
 
     def showEvent(self, e):
         self._ensure_grouped()
@@ -194,7 +212,7 @@ class AlbumTracksView(QAbstractScrollArea):
     def _on_loaded(self, _gen, key, data):
         pm = QPixmap()
         if data and pm.loadFromData(data):
-            inner = self.ART
+            inner = self.ART_FULL
             self._art[key] = with_border(pm.scaled(inner, inner, Qt.AspectRatioMode.KeepAspectRatio,
                                                    Qt.TransformationMode.SmoothTransformation), border_color(self))
         else:
@@ -202,7 +220,7 @@ class AlbumTracksView(QAbstractScrollArea):
         self.viewport().update()
 
     def _placeholder(self):
-        pm = QPixmap(self.ART, self.ART); pm.fill(self.palette().color(QPalette.ColorRole.Button))
+        pm = QPixmap(self.ART_FULL, self.ART_FULL); pm.fill(self.palette().color(QPalette.ColorRole.Button))
         p = QPainter(pm); p.setPen(QColor(255, 255, 255, 70)); f = p.font(); f.setPointSize(36); p.setFont(f)
         p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, "♪"); p.end()
         return with_border(pm, border_color(self))
@@ -212,7 +230,8 @@ class AlbumTracksView(QAbstractScrollArea):
         p = QPainter(self.viewport())
         pal = self.palette()
         w, h = self.viewport().width(), self.viewport().height()
-        p.fillRect(0, 0, w, h, pal.color(QPalette.ColorRole.Base))
+        if not getattr(self, "see_through", False):               # the Glow skin shows the blurred cover behind
+            p.fillRect(0, 0, w, h, pal.color(QPalette.ColorRole.Base))
         if not self.groups:
             p.end(); return
         off = self.verticalScrollBar().value()
@@ -221,11 +240,16 @@ class AlbumTracksView(QAbstractScrollArea):
         text, dim = pal.color(QPalette.ColorRole.Text), pal.color(QPalette.ColorRole.PlaceholderText)
         hl, hl_text = pal.color(QPalette.ColorRole.Highlight), pal.color(QPalette.ColorRole.HighlightedText)
         alt = pal.color(QPalette.ColorRole.AlternateBase)
+        if getattr(self, "see_through", False):
+            alt = QColor(255, 255, 255, 38)                       # a hint of striping over the blurred cover
         playing = QColor(self.model.playing_color)
         bold = QFont(self.font()); bold.setBold(True); bold.setPointSizeF(self.font().pointSizeF() * 1.1)
         fm = self.fontMetrics()
         star_w = max(8, fm.horizontalAdvance("★"))
-        rating_w, time_w, no_w = star_w * 5 + 8, 56, 34
+        compact = self._compact
+        rating_w, time_w, no_w = (0 if compact else star_w * 5 + 8), 56, 34
+        side = self.ART + 2 * BORDER
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         ph = None
         while g < len(self.groups) and self.tops[g] - off < h:
             s, e, k = self.groups[g]
@@ -252,7 +276,12 @@ class AlbumTracksView(QAbstractScrollArea):
             art = self._art.get(k)
             if art is None:
                 art = ph = ph or self._placeholder()
-            p.drawPixmap(10, top + self.HEAD + 2, art)
+            if compact:
+                sz = art.size().scaled(side, side, Qt.AspectRatioMode.KeepAspectRatio)
+                p.drawPixmap(QRect(10, top + self.HEAD + 2, sz.width(), sz.height()), art)
+            else:
+                p.drawPixmap(10, top + self.HEAD + 2, art)
+            discs = len({t.get("disc_no") or 1 for t in rows[s:e]}) > 1     # several discs: 1-01, 2-01...
             # tracks
             y = top + self.HEAD
             for r in range(s, e):
@@ -267,20 +296,26 @@ class AlbumTracksView(QAbstractScrollArea):
                     col = hl_text if selected else (playing if t["id"] == self.model.playing_id else text)
                     p.setPen(col)
                     x = self.LEFT + 4
-                    no = ("▶ " if t["id"] == self.model.playing_id else "") + (str(t.get("track_no") or ""))
-                    p.drawText(QRect(x, y, no_w, self.ROW), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, no)
-                    x += no_w + 12
+                    no = str(t.get("track_no") or "")
+                    if discs and no:
+                        no = f'{t.get("disc_no") or 1}-{no.zfill(2)}'
+                    if t["id"] == self.model.playing_id:
+                        no = "▶ " + no
+                    p.drawText(QRect(x, y, no_w + (14 if discs else 0), self.ROW),
+                               Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, no)
+                    x += no_w + 12 + (14 if discs else 0)
                     title_w = max(40, w - x - rating_w - time_w - 12)
                     title = t.get("title") or ""
-                    if t.get("artist") and t.get("artist") != aa:
+                    if (t.get("artist") or "").strip() and t.get("artist") != aa:
                         title = f'{title}  —  {t["artist"]}'
                     if t.get("starred"):
                         title = "♥ " + title
                     p.drawText(QRect(x, y, title_w, self.ROW), Qt.AlignmentFlag.AlignVCenter,
                                fm.elidedText(title, Qt.TextElideMode.ElideRight, title_w))
-                    rv = t.get("rating") or 0
-                    p.drawText(QRect(w - rating_w - time_w - 4, y, rating_w, self.ROW), Qt.AlignmentFlag.AlignVCenter,
-                               "★" * rv + "☆" * (5 - rv))
+                    if not compact:
+                        rv = t.get("rating") or 0
+                        p.drawText(QRect(w - rating_w - time_w - 4, y, rating_w, self.ROW), Qt.AlignmentFlag.AlignVCenter,
+                                   "★" * rv + "☆" * (5 - rv))
                     dur = "live" if t.get("source") == "radio" else fmt_time(t.get("duration"))
                     p.drawText(QRect(w - time_w - 8, y, time_w, self.ROW),
                                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, dur)
@@ -291,6 +326,8 @@ class AlbumTracksView(QAbstractScrollArea):
     def _rating_x(self):
         star_w = max(8, self.fontMetrics().horizontalAdvance("★"))
         rating_w = star_w * 5 + 8
+        if self._compact:                                      # no rating column: nothing to hit
+            return self.viewport().width() + 10000, star_w
         return self.viewport().width() - rating_w - 56 - 4, star_w
 
     # ------------------------------------------------------------------ selection and input

@@ -16,6 +16,15 @@ BUILTIN = {
     "MusicBee": dict(window="#1b1b1b", text="#dcdcdc", base="#161616", alt="#161616", button="#262626",
                      highlight="#2a2a2a", hl_text="#ffffff", accent="#1fa8e8", style="musicbee", dim="#6b6b6b",
                      border="#262626", panel_top="#1b1b1b", panel_bot="#1b1b1b", r=0, r_panel=0),
+    "MusicBee Green": dict(window="#1a1a1a", text="#dcdcdc", base="#161616", alt="#161616", button="#262626",
+                           highlight="#5fb720", hl_text="#ffffff", accent="#6cc424", style="musicbee", dim="#6b6b6b",
+                           border="#262626", panel_top="#1a1a1a", panel_bot="#1a1a1a", r=0, r_panel=0),
+    "MusicBee Blue": dict(window="#0b1730", text="#e2e8f4", base="#0a1226", alt="#0e1b38", button="#14264a",
+                          highlight="#1b3a73", hl_text="#ffffff", accent="#4da3ff", style="musicbee", dim="#7d8bab",
+                          border="#14264a", panel_top="#0b1730", panel_bot="#0b1730", r=0, r_panel=0),
+    "MusicBee Glow": dict(window="#b3c4c4", text="#2f343a", base="#c2ccc8", alt="#c2ccc8", button="#9db0b2",
+                          highlight="#7f9396", hl_text="#ffffff", accent="#2f5568", style="musicbee", glow=True,
+                          dim="#59656b", border="#9db0b2", panel_top="#b3c4c4", panel_bot="#b3c4c4", r=12, r_panel=14),
     "Neomorphic": dict(window="#e0e5ec", text="#44495a", base="#e6ebf2", alt="#dde2e9", button="#e0e5ec",
                        highlight="#cfd8e6", hl_text="#2f3547", accent="#5b7cfa", style="neo", dim="#8d96a8",
                        border="#c3cad6", panel_top="#e0e5ec", panel_bot="#e0e5ec", btn_top="#e0e5ec",
@@ -201,21 +210,22 @@ def _musicbee_qss(t: dict) -> str:
     return f"""
 QToolBar {{ background: {w}; border: 0; spacing: 4px; padding: 2px 6px; }}
 QToolBar QToolButton, QToolBar QPushButton {{ background: transparent; border: 0; padding: 4px 8px; color: {tx}; }}
-QToolBar QToolButton:hover, QToolBar QPushButton:hover {{ background: #2a2a2a; }}
+QToolBar QToolButton:hover, QToolBar QPushButton:hover {{ background: {t['highlight']}; }}
 QToolBar QToolButton:checked, QToolBar QPushButton:checked {{ background: transparent; color: {ac}; }}
 QToolBar QToolButton:!checked:checkable {{ border: 0; padding: 4px 8px; }}
 QToolBar QLineEdit {{ background: transparent; border: 0; border-bottom: 1px solid #333; border-radius: 0;
     padding: 3px 4px; color: {tx}; }}
 QToolBar QLineEdit:focus {{ border-bottom: 1px solid {ac}; }}
 QPushButton#btn_shuffle:checked, QPushButton#btn_repeat:checked {{ background: transparent; border: 0; }}
+QToolButton::menu-button {{ border: 0; background: transparent; width: 10px; }}
 QMenuBar {{ background: {w}; }}
-QMenuBar::item:selected, QMenu::item:selected {{ background: #2e2e2e; color: {tx}; }}
+QMenuBar::item:selected, QMenu::item:selected {{ background: {t['highlight']}; color: #ffffff; }}
 QMenu {{ background: #202020; border: 1px solid #333; border-radius: 0; }}
 QListView, QTreeView, QTableView {{ background: {w}; alternate-background-color: {w}; border: 0; border-radius: 0;
     outline: 0; }}
 QTreeView::item:selected, QListView::item:selected, QTreeView::item:hover, QListView::item:hover {{
-    background: #2a2a2a; color: {tx}; }}
-QTableView {{ selection-background-color: #2e2e2e; selection-color: #ffffff; }}
+    background: {t['highlight']}; color: #ffffff; }}
+QTableView {{ selection-background-color: {t['highlight']}; selection-color: #ffffff; }}
 QHeaderView::section {{ background: {w}; color: {tx}; border: 0; border-bottom: 1px solid #2a2a2a; padding: 4px 6px; }}
 QDockWidget::title {{ background: {w}; border: 0; color: {tx}; padding: 4px 6px; font-weight: bold; }}
 QSplitter::handle {{ background: {w}; }}
@@ -241,7 +251,7 @@ QListWidget#albumgrid::item, QListWidget#albumgrid::item:selected, QListWidget#a
 
 # the groups of the View -> Skin menu, in order; user skins can name one with "category" (anything else: "Custom")
 CATEGORIES = {
-    "Flat": ["MusicBee", "Dark", "Light", "AMOLED", "High Contrast", "Slate Light", "Paper"],
+    "Flat": ["MusicBee", "MusicBee Glow", "MusicBee Green", "MusicBee Blue", "Dark", "Light", "AMOLED", "High Contrast", "Slate Light", "Paper"],
     "Neomorphic": ["Neomorphic", "Neomorphic Dark"],
     "Classic": ["Winamp Classic", "Classic", "Classic 98", "Amp Classic", "Chrome Deck", "Olive Noir"],
     "Modern": ["Modern Night", "Luna Midnight", "Aqua Deck", "Ice Blue", "Emerald Core", "Vapor Dusk", "Midnight",
@@ -260,6 +270,28 @@ def grouped(skin_map: dict | None = None) -> dict:
         if n not in placed:
             out.setdefault(str(t.get("category") or "Custom"), []).append(n)
     return {c: names for c, names in out.items() if names}
+
+
+def _glow_qss(t: dict) -> str:
+    """MusicBee with the cover's colours blurred behind everything (the window paints it): every panel is see-through,
+    tabs are pills, the player bar is a dark glass strip."""
+    tx = t["text"]
+    return f"""
+QMainWindow, QDockWidget, QDockWidget > QWidget, QAbstractScrollArea, QAbstractScrollArea > QWidget,
+QToolBar, QStatusBar, QMenuBar, QTabBar, QStackedWidget, QSplitter {{ background: transparent; }}
+QListView, QTreeView, QTableView, QListWidget#albumgrid {{ background: transparent; alternate-background-color: transparent; }}
+QTreeView::item:selected, QListView::item:selected, QTreeView::item:hover, QListView::item:hover {{
+    background: rgba(255,255,255,70); color: {tx}; border-radius: 8px; }}
+QTableView {{ selection-background-color: rgba(255,255,255,90); selection-color: {tx}; }}
+QHeaderView::section {{ background: transparent; color: {tx}; border-bottom: 1px solid rgba(0,0,0,40); }}
+QTabBar::tab {{ background: rgba(70,85,95,120); color: {tx}; border-radius: 12px; margin: 3px 0 3px 6px; padding: 3px 12px 3px 14px; }}
+QTabBar::tab:selected {{ background: rgba(60,75,88,190); color: #ffffff; }}
+QToolBar#tb_controls, QToolBar#tb_volume, QToolBar#tb_seek {{ background: rgba(255,255,255,70); }}
+QLineEdit {{ background: rgba(255,255,255,70); border: 0; border-radius: 12px; padding: 3px 10px; color: {tx}; }}
+QMenu {{ background: #cdd6d2; color: {tx}; }}
+QMenuBar::item:selected, QMenu::item:selected {{ background: rgba(60,75,88,160); color: #ffffff; }}
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{ background: rgba(60,75,88,140); border-radius: 3px; }}
+"""
 
 
 def _neo_qss(t: dict) -> str:
@@ -452,6 +484,8 @@ QListWidget#albumgrid::item:selected {{ background: {t['highlight']}; color: {t[
 """
     if t.get("style") == "musicbee":
         out += _musicbee_qss(t)
+        if t.get("glow"):
+            out += _glow_qss(t)
     elif t.get("style") == "neo":
         out += _neo_qss(t)
     elif t.get("style") == "winamp":

@@ -7,6 +7,8 @@ import re
 from PyQt6.QtCore import QEvent, Qt
 from PyQt6.QtWidgets import QMenu, QTabBar, QToolButton
 
+from .pages import PAGE_TITLES
+
 DEFAULT_TAB = {"source": ["all", None]}
 
 
@@ -25,14 +27,51 @@ class TabsMixin:
         self.tab_bar.tabBarDoubleClicked.connect(lambda i: i < 0 and self._new_tab())
         self.tab_bar.installEventFilter(self)
         self.btn_new_tab = QToolButton(); self.btn_new_tab.setText("+"); self.btn_new_tab.setAutoRaise(True)
-        self.btn_new_tab.setToolTip("New tab (Ctrl+T)"); self.btn_new_tab.clicked.connect(lambda: self._new_tab())
+        self.btn_new_tab.setToolTip("New tab (Ctrl+T); the arrow opens the Visualizer or Now Playing page")
+        self.btn_new_tab.clicked.connect(lambda: self._new_tab())
+        nm = QMenu(self.btn_new_tab)
+        nm.addAction("New Tab", lambda: self._new_tab())
+        nm.addAction("Visualizer", lambda: self._open_page("visualizer"))
+        nm.addAction("Now Playing", lambda: self._open_page("nowplaying"))
+        self.btn_new_tab.setMenu(nm); self.btn_new_tab.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self._nav_back: list[dict] = []; self._nav_fwd: list[dict] = []; self._nav_lock = False
+        self.btn_back = QToolButton(); self.btn_back.setText("←"); self.btn_back.setAutoRaise(True)
+        self.btn_fwd = QToolButton(); self.btn_fwd.setText("→"); self.btn_fwd.setAutoRaise(True)
+        self.btn_back.setToolTip("Back"); self.btn_fwd.setToolTip("Forward")
+        self.btn_back.clicked.connect(lambda: self._nav_go(-1)); self.btn_fwd.clicked.connect(lambda: self._nav_go(1))
+        self._nav_buttons()
+        tb.addWidget(self.btn_back); tb.addWidget(self.btn_fwd)
         tb.addWidget(self.tab_bar); tb.addWidget(self.btn_new_tab)
         self.tabs: list[dict | None] = [None]            # None = the live view of the current tab
         self._tab_cur = 0
         self._tab_lock = True
-        self.tab_bar.addTab("Music")
+        self._add_tab("Music")
         self._tab_lock = False
         self._update_close_buttons()
+
+    # ------------------------------------------------------------------ back / forward
+    def _nav_buttons(self):
+        self.btn_back.setEnabled(bool(self._nav_back)); self.btn_fwd.setEnabled(bool(self._nav_fwd))
+
+    def _nav_remember(self):
+        """Call before the view changes (another source, artist, jump): Back returns to what was shown."""
+        if getattr(self, "_nav_lock", True) or not hasattr(self, "model"):
+            return
+        self._nav_back.append(self._view_state()); del self._nav_back[:-50]
+        self._nav_fwd.clear(); self._nav_buttons()
+
+    def _nav_go(self, step):
+        src, dst = (self._nav_back, self._nav_fwd) if step < 0 else (self._nav_fwd, self._nav_back)
+        if not src:
+            return
+        dst.append(self._view_state())
+        state = src.pop()
+        self._nav_lock = True
+        try:
+            self._apply_view_state(state)
+        finally:
+            self._nav_lock = False
+        self._nav_buttons(); self._update_tab_label()
 
     # ------------------------------------------------------------------ labels
     def _source_label(self, src):
@@ -49,6 +88,8 @@ class TabsMixin:
         return "Music"
 
     def _tab_label(self, state=None):
+        if state is not None and state.get("page") in PAGE_TITLES:
+            return PAGE_TITLES[state["page"]]
         if state is None:
             src, search = self.source, self.search.text().strip()
         else:
@@ -59,10 +100,29 @@ class TabsMixin:
     def _update_tab_label(self):
         if getattr(self, "tab_bar", None) is not None and not self._tab_lock:
             i = self._tab_cur
+            if 0 <= i < len(self.tabs) and self.tabs[i] is not None and self.tabs[i].get("page"):
+                return                                             # a page tab keeps its name
             if 0 <= i < self.tab_bar.count():
                 label = self._tab_label()
                 self.tab_bar.setTabText(i, label if len(label) <= 40 else label[:39] + "…")
                 self.tab_bar.setTabToolTip(i, label)
+
+    def _add_tab(self, label):
+        """Add a tab with a small flat ✕ in the text colour (the style's own close icon is a grey or red box)."""
+        i = self.tab_bar.addTab(label)
+        b = QToolButton(self.tab_bar); b.setText("✕"); b.setAutoRaise(True); b.setToolTip("Close tab (Ctrl+W)")
+        b.setObjectName("tab_close"); b.setCursor(Qt.CursorShape.ArrowCursor); b.setFixedSize(18, 18)
+        b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        b.setStyleSheet("QToolButton { border: 0; border-radius: 9px; background: transparent; padding: 0; font-size: 9px; }"
+                        "QToolButton:hover { background: rgba(128,128,128,90); }")
+        b.clicked.connect(lambda _c=False, b=b: self._close_tab_of(b))
+        self.tab_bar.setTabButton(i, QTabBar.ButtonPosition.RightSide, b)
+        return i
+
+    def _close_tab_of(self, button):
+        for i in range(self.tab_bar.count()):
+            if self.tab_bar.tabButton(i, QTabBar.ButtonPosition.RightSide) is button:
+                self._close_tab(i); return
 
     def _update_close_buttons(self):
         many = self.tab_bar.count() > 1
@@ -76,11 +136,12 @@ class TabsMixin:
     def _tab_changed(self, i):
         if self._tab_lock or i < 0 or i == self._tab_cur:
             return
-        if 0 <= self._tab_cur < len(self.tabs):
-            self.tabs[self._tab_cur] = self._view_state()          # remember the tab we leave
+        if 0 <= self._tab_cur < len(self.tabs) and self.tabs[self._tab_cur] is None:
+            self.tabs[self._tab_cur] = self._view_state()          # remember the tab we leave (a page tab is its own state)
         self._tab_cur = i
         state = self.tabs[i] or DEFAULT_TAB
-        self.tabs[i] = None
+        if not state.get("page"):
+            self.tabs[i] = None
         self._apply_view_state(state)
         self._update_tab_label()
 
@@ -88,12 +149,19 @@ class TabsMixin:
         """Open a tab (All Music by default, or a copy of a view) and switch to it."""
         state = dict(state or DEFAULT_TAB)
         self._tab_lock = True
-        i = self.tab_bar.addTab(self._tab_label(state))
+        i = self._add_tab(self._tab_label(state))
         self.tabs.append(state)
         self._tab_lock = False
         self._update_close_buttons()
         self.tab_bar.setCurrentIndex(i)
         return i
+
+    def _open_page(self, kind):
+        """Open (or switch to) a whole-window page tab: 'visualizer' or 'nowplaying'."""
+        for i, t in enumerate(self.tabs):
+            if t is not None and t.get("page") == kind:
+                self.tab_bar.setCurrentIndex(i); return i
+        return self._new_tab({"page": kind})
 
     def _close_tab(self, i=None):
         i = self._tab_cur if i is None or isinstance(i, bool) else i
@@ -165,8 +233,8 @@ class TabsMixin:
         for k, t in enumerate(tabs):
             t = t if isinstance(t, dict) else dict(DEFAULT_TAB)
             label = self._tab_label(t)
-            self.tab_bar.addTab(label if len(label) <= 40 else label[:39] + "…")
-            self.tabs.append(None if k == cur else t)
+            self._add_tab(label if len(label) <= 40 else label[:39] + "…")
+            self.tabs.append(None if k == cur and not t.get("page") else t)
         self.tab_bar.setCurrentIndex(cur)
         self._tab_cur = cur
         self._tab_lock = False

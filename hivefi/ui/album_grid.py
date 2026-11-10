@@ -2,7 +2,7 @@
 from PyQt6.QtCore import QEvent, QObject, QRect, QRunnable, QSize, Qt, QThreadPool, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (QAbstractItemView, QListView, QListWidget, QListWidgetItem, QStyledItemDelegate,
-                             QToolTip)
+                             QToolTip, QVBoxLayout, QWidget)
 
 from .. import art
 from ..albums import title_of
@@ -49,11 +49,16 @@ class _FlatDelegate(QStyledItemDelegate):
         r = option.rect
         cover = QRect(r.x() + (r.width() - ICON) // 2, r.y() + 6, ICON, ICON)
         icon = index.data(Qt.ItemDataRole.DecorationRole)
+        if getattr(self.parent(), "rounded", False):               # the Glow skin: rounded covers
+            from PyQt6.QtGui import QPainterPath
+            path = QPainterPath(); path.addRoundedRect(cover.x(), cover.y(), ICON, ICON, 14, 14)
+            p.setClipPath(path); p.setRenderHint(QPainter.RenderHint.Antialiasing)
         if isinstance(icon, QIcon) and not icon.isNull():
             pm = icon.pixmap(ICON * 2, ICON * 2)
             sz = pm.size().scaled(ICON, ICON, Qt.AspectRatioMode.KeepAspectRatio)
             p.drawPixmap(QRect(cover.x() + (ICON - sz.width()) // 2, cover.bottom() + 1 - sz.height(),
                                sz.width(), sz.height()), pm)
+        p.setClipping(False)
         if option.state & option.state.State_Selected:
             p.setPen(QPen(option.palette.link().color(), 3)); p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(cover.adjusted(1, 1, -1, -1))
@@ -72,7 +77,56 @@ class _FlatDelegate(QStyledItemDelegate):
         p.restore()
 
 
+class LetterBar(QWidget):
+    """MusicBee's  # A B C ... Z  strip: click a letter to jump to the first album whose artist starts with it."""
+    picked = pyqtSignal(str)
+    LETTERS = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(22); self.setMouseTracking(True)
+        self._hot = -1; self._have: set[str] = set(self.LETTERS)
+
+    def set_present(self, letters):
+        self._have = set(letters); self.update()
+
+    def _cell(self):
+        return self.width() / len(self.LETTERS)
+
+    def paintEvent(self, _e):
+        p = QPainter(self); w = self._cell()
+        for i, ch in enumerate(self.LETTERS):
+            c = QColor(self.palette().text().color())
+            c.setAlpha(255 if i == self._hot else (190 if ch in self._have else 60))
+            p.setPen(c)
+            p.drawText(QRect(int(i * w), 0, int(w) + 1, self.height()), Qt.AlignmentFlag.AlignCenter, ch)
+
+    def mouseMoveEvent(self, e):
+        i = int(e.position().x() // self._cell()); self._hot = i if 0 <= i < len(self.LETTERS) else -1; self.update()
+
+    def leaveEvent(self, _e):
+        self._hot = -1; self.update()
+
+    def mousePressEvent(self, e):
+        i = int(e.position().x() // self._cell())
+        if 0 <= i < len(self.LETTERS):
+            self.picked.emit(self.LETTERS[i])
+
+
+class AlbumsPage(QWidget):
+    """Letter strip above the album grid."""
+
+    def __init__(self, grid):
+        super().__init__()
+        lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
+        self.bar = LetterBar(); self.grid = grid
+        lay.addWidget(self.bar); lay.addWidget(grid)
+        self.bar.picked.connect(grid.scroll_to_letter)
+        grid.lettersChanged.connect(self.bar.set_present)
+
+
 class AlbumGrid(QListWidget):
+    lettersChanged = pyqtSignal(object)              # the letters that have albums (for the A-Z strip)
     albumSelected = pyqtSignal(object)               # the album's tracks, or None when nothing is selected
     playRequested = pyqtSignal(list)
     contextRequested = pyqtSignal(list, object)      # tracks, global pos
@@ -102,6 +156,7 @@ class AlbumGrid(QListWidget):
         self._timer = QTimer(self, singleShot=True, interval=80, timeout=self._request_visible)
         self.verticalScrollBar().valueChanged.connect(lambda _v: self._timer.start())
         self.flat = False
+        self.rounded = False
         self.placeholder = _placeholder(QColor(60, 60, 66), border_color(self))
 
     def set_flat(self, on: bool):
@@ -130,7 +185,22 @@ class AlbumGrid(QListWidget):
             it.setData(KEY, key)
             self.addItem(it); self._items[key] = it
         self.blockSignals(False)
+        self._letter_rows = {}
+        for i in range(self.count()):
+            ts = self.albums[self.item(i).data(KEY)]
+            ch = sort_name(ts[0].get("_aa") or ts[0]["album_artist"] or ts[0]["artist"])[:1].upper()
+            self._letter_rows.setdefault(ch if ch.isalpha() and ch.isascii() else "#", i)
+        self.lettersChanged.emit(set(self._letter_rows))
         self._timer.start()
+
+    def scroll_to_letter(self, ch):
+        """Jump to the first album of an artist starting with `ch` (the next letter that has some, if none does)."""
+        letters = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        for c in letters[letters.index(ch):]:
+            row = getattr(self, "_letter_rows", {}).get(c)
+            if row is not None:
+                self.scrollToItem(self.item(row), QAbstractItemView.ScrollHint.PositionAtTop)
+                return
 
     def album_tracks(self, it):
         ts = self.albums.get(it.data(KEY), [])

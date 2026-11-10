@@ -13,9 +13,11 @@ class FullscreenVisualizer(QWidget):
     closed = pyqtSignal()
     effectChanged = pyqtSignal(str)
     effectFailed = pyqtSignal(str, str)           # effect name, what went wrong (the effect is skipped from then on)
+    doubleClicked = pyqtSignal()                  # embedded in a page: double-click asks for the fullscreen window
 
-    def __init__(self, cfg, parent=None):
-        super().__init__(parent, Qt.WindowType.Window)
+    def __init__(self, cfg, parent=None, embedded=False):
+        super().__init__(parent, Qt.WindowType.Widget if embedded else Qt.WindowType.Window)
+        self.embedded = embedded
         self.setWindowTitle("Hivefi Visualizer")
         self.cfg = cfg
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
@@ -100,7 +102,8 @@ class FullscreenVisualizer(QWidget):
         self._overlay_at = time.monotonic()
 
     def start(self):
-        self.showFullScreen()
+        if not self.embedded:
+            self.showFullScreen()
         self.timer.start()
         self.setFocus()
 
@@ -190,12 +193,12 @@ class FullscreenVisualizer(QWidget):
         f.setPointSize(max(11, h // 60)); p.setFont(f); p.setPen(QColor(200, 200, 200, alpha))
         mode = f"auto ({self.cycle}s)" if self.auto and self.cycle else "auto" if self.auto else "fixed"
         p.drawText(QRectF(24, h - 70, w - 48, 30), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                   f"{self.effect.name}  ·  {mode}  ·  ← → change   Space auto   O overlay   Esc exit")
+                   f"{self.effect.name}  ·  {mode}  ·  ← → change   Space auto   O overlay   " + ("double-click: fullscreen" if self.embedded else "Esc exit"))
 
     # ---- input
     def keyPressEvent(self, e):
         k = e.key()
-        if k in (Qt.Key.Key_Escape, Qt.Key.Key_Q, Qt.Key.Key_F8):
+        if k in (Qt.Key.Key_Escape, Qt.Key.Key_Q, Qt.Key.Key_F8) and not self.embedded:
             self.close()
         elif k in (Qt.Key.Key_Right, Qt.Key.Key_PageDown, Qt.Key.Key_N):
             self.next_effect(1)
@@ -214,7 +217,10 @@ class FullscreenVisualizer(QWidget):
             super().keyPressEvent(e)
 
     def mouseDoubleClickEvent(self, e):
-        self.close()
+        if self.embedded:
+            self.doubleClicked.emit()
+        else:
+            self.close()
 
     def mouseMoveEvent(self, e):
         self._cursor_at = time.monotonic()

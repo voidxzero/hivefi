@@ -332,3 +332,22 @@ class TrackInfoPanel(QScrollArea):
         from html import escape
         self.lbl.setText("<table cellpadding=2>" + "".join(
             f"<tr><td><i>{k}</i>&nbsp;&nbsp;</td><td>{escape(str(v))}</td></tr>" for k, v in rows) + "</table>")
+
+
+def blurred(pm, size=96, sigma=9.0):
+    """A cover as a soft background: shrunk, then a real Gaussian blur (only enlarging a tiny image shows its pixels
+    as a grid of gradients). The result is small; draw it stretched with SmoothPixmapTransform."""
+    import numpy as np
+    from PyQt6.QtGui import QImage, QPixmap
+    img = pm.toImage().scaled(size, size, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    img = img.convertToFormat(QImage.Format.Format_RGB888)
+    bits = img.constBits(); bits.setsize(img.sizeInBytes())
+    a = np.frombuffer(bits, np.uint8).reshape(size, img.bytesPerLine())[:, :size * 3].reshape(size, size, 3).astype(np.float32)
+    r = int(sigma * 3)
+    k = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2); k /= k.sum()
+    for axis in (0, 1):
+        pad = [(r, r) if i == axis else (0, 0) for i in range(3)]
+        padded = np.pad(a, pad, mode="edge")
+        a = sum(kv * (padded[i:i + size] if axis == 0 else padded[:, i:i + size]) for i, kv in enumerate(k))
+    out = np.ascontiguousarray(np.clip(a, 0, 255).astype(np.uint8))
+    return QPixmap.fromImage(QImage(out.data, size, size, size * 3, QImage.Format.Format_RGB888).copy())

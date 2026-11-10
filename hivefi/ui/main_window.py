@@ -5,13 +5,13 @@ import sys
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QByteArray, QEventLoop, QSize, Qt, QThread, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import (QAction, QActionGroup, QColor, QCursor, QDesktopServices, QIcon, QKeySequence, QPixmap,
-                         QShortcut)
+from PyQt6.QtCore import QByteArray, QEvent, QEventLoop, QSize, Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import (QAction, QActionGroup, QColor, QCursor, QDesktopServices, QIcon, QKeySequence, QLinearGradient,
+                         QPainter, QPixmap, QShortcut)
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget, QFileDialog, QInputDialog, QLabel,
                              QLineEdit, QListWidget, QMainWindow, QMenu, QMenuBar, QMessageBox, QPushButton, QSlider,
                              QSplitter, QStackedWidget, QStyle, QSystemTrayIcon, QTableView, QToolBar,
-                             QSizePolicy, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+                             QSizePolicy, QTabWidget, QTreeWidget, QTreeWidgetItem, QToolButton, QVBoxLayout, QHBoxLayout, QWidget)
 
 from .. import art, scanner, sync
 from . import icons
@@ -22,7 +22,7 @@ from ..player import Player
 from ..subsonic import Subsonic, SubsonicError
 from .. import art, convert, coverart, devicesync, inbox as inbox_mod, lastfm, notify, podcasts, sortkey, folders, stats as libstats, libexport, listenbrainz, lyrics, radio, tagtools, organizer, rgscan, skins, smart, tagedit, updater
 from .artist_list import ArtistList
-from .album_grid import AlbumGrid
+from .album_grid import AlbumGrid, AlbumsPage
 from .album_tracks import AlbumTracksView
 from .dialogs import TagDialog
 from .audio_dialog import AudioDialog
@@ -95,6 +95,45 @@ class SourceTree(QTreeWidget):
             e.acceptProposedAction()
 
 
+class WindowButtons(QWidget):
+    """The corner of the menu bar: the window title and minimise / maximise / close, in place of a title bar."""
+
+    def __init__(self, win, with_title=True):
+        super().__init__(win)
+        self.win = win
+        lay = QHBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
+        self.title = QLabel(""); self.title.setVisible(with_title); self.title.setStyleSheet("color: palette(mid); padding-right: 14px;")
+        self.title.setFixedWidth(self.TITLE_W)                   # the bar sizes its corner once: a fixed, elided label
+        self.title.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(self.title)
+        self.btns = []
+        for name, text, tip, fn in (("min", "–", "Minimise", win.showMinimized), ("max", "□", "Maximise / restore", self.toggle),
+                                    ("close", "✕", "Close", win.close)):
+            b = QToolButton(); b.setObjectName("winbtn_" + name); b.setText(text); b.setToolTip(tip)
+            b.setFixedSize(42, 28); b.setAutoRaise(True); b.clicked.connect(lambda _c=False, f=fn: f())
+            b.setStyleSheet("QToolButton { border: 0; background: transparent; font-size: 14px; }"
+                            "QToolButton:hover { background: rgba(128,128,128,70); }"
+                            + ("QToolButton:hover { background: #e81123; color: white; }" if name == "close" else ""))
+            lay.addWidget(b); self.btns.append(b)
+        win.windowTitleChanged.connect(self.set_title)
+        self.set_title(win.windowTitle())
+
+    TITLE_W = 340
+
+    def set_title(self, text):
+        self.title.setText(self.title.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, self.TITLE_W - 18))
+        self.title.setToolTip(text)
+
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if e.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange) and hasattr(self, "title"):
+            self.set_title(self.win.windowTitle())
+
+    def toggle(self):
+        w = self.win
+        w.showNormal() if w.isMaximized() else w.showMaximized()
+
+
 class MenuWindow(QWidget):
     """The menu bar in a small window of its own (Settings → General → menu bar)."""
     closed = pyqtSignal()
@@ -162,6 +201,7 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         self._set_list_mode(cfg.list_mode, sort=False)
         self._apply_skin_visuals()
         self._apply_menu_mode()
+        self._apply_titlebar()
         self.sleep_timer = QTimer(self, singleShot=True, timeout=self._sleep_fire)
         self._setup_watch()
 
@@ -173,6 +213,63 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         w.done.connect(lambda _n: (self._restore_session(), self._startup(), self._after_first_load()))
         w.failed.connect(lambda _e: (self.load_source(), self._startup(), self._after_first_load()))
         self._run(w)
+
+    # ------------------------------------------------ page tabs (Visualizer, Now Playing)
+    def _show_page(self, kind):
+        pages = self.__dict__.setdefault("_pages", {})
+        shown = getattr(self, "_page_shown", None)
+        if shown and shown != kind and shown in pages:
+            pages[shown].hide()
+        self._page_shown = kind
+        for w in (getattr(self, "search", None), self.findChild(QToolBar, "tb_mode")):
+            if w is not None:
+                w.setEnabled(not kind)                           # search and Columns / Albums belong to library tabs
+        if not kind:
+            return
+        if kind not in pages:
+            from .pages import NowPlayingPage, VisualizerPage
+            pages[kind] = (VisualizerPage if kind == "visualizer" else NowPlayingPage)(self)
+        pg = pages[kind]
+        self._place_page(pg); pg.show(); pg.raise_()
+
+    def _place_page(self, pg=None):
+        """The page covers everything between the top toolbars (tabs...) and the bottom toolbar (player bar)."""
+        pg = pg or self.__dict__.get("_pages", {}).get(getattr(self, "_page_shown", None))
+        if pg is None:
+            return
+        top = self.menuBar().geometry().bottom() + 1 if self.menuBar().isVisible() else 0
+        bottom = self.height() - (self.statusBar().height() if self.statusBar().isVisible() else 0)
+        for tb in self.toolbars:
+            if not tb.isVisible():
+                continue
+            area = self.toolBarArea(tb)
+            if area == Qt.ToolBarArea.TopToolBarArea:
+                top = max(top, tb.geometry().bottom() + 1)
+            elif area == Qt.ToolBarArea.BottomToolBarArea:
+                bottom = min(bottom, tb.geometry().top())
+        pg.setGeometry(0, top, self.width(), max(50, bottom - top))
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._place_page()
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if not self.skin_tokens.get("glow"):
+            return
+        p = QPainter(self); r = self.rect()
+        cover = getattr(self, "_last_cover", None)
+        if cover is not None and not cover.isNull():                 # the playing cover, blurred (once per cover)
+            if getattr(self, "_glow_key", None) != cover.cacheKey():
+                from .panels import blurred
+                self._glow_key, self._glow_bg = cover.cacheKey(), blurred(cover, sigma=14.0)
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            p.drawPixmap(r, self._glow_bg)
+            p.fillRect(r, QColor(255, 255, 255, 95))
+        else:
+            g = QLinearGradient(0, 0, r.width(), r.height())
+            g.setColorAt(0, QColor("#a9c2c6")); g.setColorAt(1, QColor("#d3c98f"))
+            p.fillRect(r, g)
 
     def _after_first_load(self):
         if self._first_run:                       # no saved layout: size the panels once the content is in
@@ -273,7 +370,7 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         self.grid.albumSelected.connect(self._on_grid_album)
         self.grid.playRequested.connect(lambda ts: self.player.play_list(ts, 0))
         self.grid.contextRequested.connect(self._grid_menu)
-        self.top_stack = QStackedWidget(); self.top_stack.addWidget(browser); self.top_stack.addWidget(self.grid)
+        self.top_stack = QStackedWidget(); self.top_stack.addWidget(browser); self.top_stack.addWidget(AlbumsPage(self.grid))
 
         # track table
         self.model = TrackModel()
@@ -480,6 +577,8 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         v.addSeparator()
         v.addAction("New Tab", QKeySequence("Ctrl+T"), lambda: self._new_tab())
         v.addAction("Close Tab", QKeySequence("Ctrl+W"), lambda: self._close_tab())
+        v.addAction("Visualizer Tab", lambda: self._open_page("visualizer"))
+        v.addAction("Now Playing Tab", lambda: self._open_page("nowplaying"))
         self.skin_menu = v.addMenu("Skin"); self._build_skin_menu()
         v.addSeparator()
         v.addAction("Mini Player", QKeySequence("Ctrl+M"), self._enter_mini)
@@ -714,6 +813,7 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
     def show_in_library(self, genre=None, artist=None, album=None, search=None, track=None):
         """Jump to a place in the library: the Genre / Artist / Album selection, or a search, with a track highlighted."""
         self._search_timer.stop()                                # a search typed a moment ago must not undo this jump
+        self._nav_remember()
         if getattr(self, "_grid_timer", None):
             self._grid_timer.stop()
         if self.source != ("all", None):
@@ -836,6 +936,7 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         it = self.tree.currentItem()
         d = it.data(0, Qt.ItemDataRole.UserRole) if it else None
         if d:
+            self._nav_remember()
             self.source = tuple(d); self.load_source()
 
     def load_source(self, keep=False):
@@ -955,7 +1056,7 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
             left = sum((q[i]["duration"] or 0) for i in self.player.upcoming() if i != self.player.index) \
                 + max(0.0, ((q[self.player.index]["duration"] or 0) - self.player.mp.position() / 1000))
         text = f"{albums} albums, {sz}, {secs / 86400:.1f} days"
-        self.status_lbl.setText(text + (f"  /  queued: -{fmt_time(left)}" if left else ""))
+        self.status_lbl.setText(text + (f"  /  queued: {fmt_time(left)}" if left else ""))
 
     # ------------------------------------------------------- playback UI
     def _visible_tracks(self):
@@ -1013,6 +1114,12 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         ok = bool(data) and pm.loadFromData(data)
         self.np_panel.art.set_art(pm if ok else None)
         self.mini.art.set_art(pm if ok else None)
+        self._last_cover = pm if ok else None
+        if self.skin_tokens.get("glow"):
+            self.update()
+        np_page = self.__dict__.get("_pages", {}).get("nowplaying")
+        if np_page is not None:
+            np_page.set_cover(self._last_cover)
 
     def _on_pos(self, ms):
         if not self.seek.isSliderDown(): self.seek.setValue(ms)
@@ -1900,6 +2007,7 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
 
     def _on_artist_pick(self, name):
         """An artist was picked in the Album Artist panel (None = All Artists)."""
+        self._nav_remember()
         if self.cfg.view_mode == "albums":
             self.model.set_filters(artist=name, album=None, ids=None)
             self._refresh_grid(artists=False); self._update_status()
@@ -2029,6 +2137,9 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         self.model.set_playing(self.model.playing_id)
         flat = self.skin_tokens.get("style") == "musicbee"
         self.grid.set_flat(flat)
+        self.grid.rounded = bool(self.skin_tokens.get("glow"))
+        self.album_view.see_through = self.grid.rounded; self.album_view.viewport().update()
+        self.update()
         self.grid.set_placeholder_color(QColor(self.skin_tokens["button"]))
         self.btn_edit.setVisible(not flat)                       # MusicBee has no such button: it is in View → Panels
         self._refresh_grid()
@@ -2297,6 +2408,115 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         w = Worker(lambda _p: sync.flush_ops(db, api), self)
         self._flush_worker = w; self._run(w)
 
+    # ------------------------------------------------ own title bar
+    _EDGE = 6
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        QTimer.singleShot(0, self._apply_titlebar)               # only now is it known whether the menu bar is in the window
+
+    def _menu_in_window(self):
+        """False with the menu in its own window or taken by the desktop (global menu in the panel, as on KDE or
+        macOS): the menu bar's corner is then not on screen and the window buttons go to the top toolbar row."""
+        mb = self.menuBar()
+        if self.cfg.menu_separate or mb.isHidden():
+            return False
+        return not self.isVisible() or (mb.isVisible() and mb.height() > 4)
+
+    def _place_window_toolbar(self):
+        """Keep the window-button toolbar at the right end of the top row (also after a layout was restored)."""
+        tb = getattr(self, "tb_window", None)
+        if tb is not None and not tb.isHidden():
+            ed = self.edit_toolbar                                 # on a row of its own below: go in front of its break
+            self.removeToolBar(tb)
+            self.insertToolBar(ed, tb); self.removeToolBarBreak(tb); self.insertToolBarBreak(ed)
+            tb.show()
+
+    def _apply_titlebar(self):
+        """Frameless window with its own minimise / maximise / close: in the menu bar's corner, or at the right of
+        the top toolbar row when the menu bar is not in the window."""
+        own = bool(self.cfg.own_titlebar)
+        in_menu = own and self._menu_in_window()
+        tb = getattr(self, "tb_window", None)
+        if own and not in_menu and tb is None:
+            tb = self.tb_window = QToolBar("Window Buttons", self); tb.setObjectName("tb_window")
+            tb.setMovable(False); tb.setFloatable(False); tb.toggleViewAction().setVisible(False)
+            tb.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
+            gap = QWidget(); gap.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            gap.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)   # clicks reach the toolbar: drag to move
+            tb.addWidget(gap); tb.addWidget(WindowButtons(self, with_title=False))
+        if tb is not None:
+            tb.setVisible(own and not in_menu)
+            self._place_window_toolbar()
+        own_filter = own and not getattr(self, "_title_filter", False)
+        if own_filter:
+            self._title_filter = True
+            self.menuBar().installEventFilter(self); QApplication.instance().installEventFilter(self)
+        own = in_menu                                              # below: the menu bar's corner
+        frameless = bool(self.cfg.own_titlebar)
+        was = bool(self.windowFlags() & Qt.WindowType.FramelessWindowHint)
+        if frameless != was:
+            vis = self.isVisible()
+            self.setWindowFlag(Qt.WindowType.FramelessWindowHint, frameless)
+            if vis:
+                self.show()
+        mb = self.menuBar()
+        if own:
+            if getattr(self, "win_buttons", None) is None:
+                self.win_buttons = WindowButtons(self)
+            mb.setCornerWidget(self.win_buttons, Qt.Corner.TopRightCorner); self.win_buttons.show()
+        elif getattr(self, "win_buttons", None) is not None:
+            mb.setCornerWidget(None, Qt.Corner.TopRightCorner); self.win_buttons.hide()
+
+    def _edges_at(self, gp):
+        if not (self.windowFlags() & Qt.WindowType.FramelessWindowHint) or self.isMaximized() or self.isFullScreen():
+            return Qt.Edge(0)
+        r, m = self.frameGeometry(), self._EDGE
+        e = Qt.Edge(0)
+        if abs(gp.x() - r.left()) <= m: e |= Qt.Edge.LeftEdge
+        if abs(gp.x() - r.right()) <= m: e |= Qt.Edge.RightEdge
+        if abs(gp.y() - r.top()) <= m: e |= Qt.Edge.TopEdge
+        if abs(gp.y() - r.bottom()) <= m: e |= Qt.Edge.BottomEdge
+        return e
+
+    def eventFilter(self, obj, e):
+        t = e.type()
+        if t == QEvent.Type.Leave and obj is self and getattr(self, "_edge_cursor", False):
+            QApplication.restoreOverrideCursor(); self._edge_cursor = False      # never leave a resize cursor behind
+        if getattr(self, "_title_filter", False) and self.windowFlags() & Qt.WindowType.FramelessWindowHint:
+            # drag the window by the empty part of the menu bar or of a top toolbar; double-click maximises
+            bar = (obj is self.menuBar() and self.menuBar().actionAt(e.position().toPoint()) is None) \
+                if t in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick) else False
+            if not bar and t in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick) \
+                    and isinstance(obj, QToolBar) and obj.window() is self and not obj.isFloating() and not self.edit_mode \
+                    and self.toolBarArea(obj) == Qt.ToolBarArea.TopToolBarArea \
+                    and not self._edges_at(e.globalPosition().toPoint()):
+                bar = True
+            if bar and e.button() == Qt.MouseButton.LeftButton:
+                if t == QEvent.Type.MouseButtonDblClick:
+                    self.showNormal() if self.isMaximized() else self.showMaximized()
+                elif self.windowHandle():
+                    self.windowHandle().startSystemMove()
+                return True
+            if t in (QEvent.Type.MouseMove, QEvent.Type.MouseButtonPress) and isinstance(obj, QWidget) \
+                    and obj.window() is self and not QApplication.mouseButtons() & ~Qt.MouseButton.LeftButton:
+                edges = self._edges_at(e.globalPosition().toPoint())
+                if t == QEvent.Type.MouseMove:
+                    cur = {Qt.Edge.LeftEdge: Qt.CursorShape.SizeHorCursor, Qt.Edge.RightEdge: Qt.CursorShape.SizeHorCursor,
+                           Qt.Edge.TopEdge: Qt.CursorShape.SizeVerCursor, Qt.Edge.BottomEdge: Qt.CursorShape.SizeVerCursor}
+                    if edges and not getattr(self, "_edge_cursor", False):
+                        corner = bool((edges & (Qt.Edge.LeftEdge | Qt.Edge.RightEdge)) and (edges & (Qt.Edge.TopEdge | Qt.Edge.BottomEdge)))
+                        main_diag = edges in (Qt.Edge.LeftEdge | Qt.Edge.TopEdge, Qt.Edge.RightEdge | Qt.Edge.BottomEdge)
+                        shape = (Qt.CursorShape.SizeFDiagCursor if main_diag else Qt.CursorShape.SizeBDiagCursor) if corner \
+                            else cur.get(edges, Qt.CursorShape.SizeAllCursor)
+                        QApplication.setOverrideCursor(shape); self._edge_cursor = True
+                    elif not edges and getattr(self, "_edge_cursor", False):
+                        QApplication.restoreOverrideCursor(); self._edge_cursor = False
+                elif edges and e.button() == Qt.MouseButton.LeftButton and self.windowHandle():
+                    self.windowHandle().startSystemResize(edges)
+                    return True
+        return super().eventFilter(obj, e)
+
     def _apply_menu_mode(self):
         """Menu bar in the main window (default) or in a separate window."""
         mb = self.menuBar()
@@ -2323,7 +2543,7 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         dlg = SettingsDialog(self.cfg, self)
         if dlg.exec():
             dlg.apply(); self._rebuild_api(); self._apply_sync_timer()
-            self.player.configure(); self._update_vis_availability(); self._setup_watch(); self._apply_menu_mode()
+            self.player.configure(); self._update_vis_availability(); self._setup_watch(); self._apply_menu_mode(); self._apply_titlebar()
             sortkey.set_articles(self.cfg.ignore_articles); self.load_source(keep=True)
             self._after_library_change()
             self.scan_library(quiet=True)

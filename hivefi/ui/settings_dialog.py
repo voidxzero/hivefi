@@ -262,6 +262,12 @@ class SettingsDialog(QDialog):
         self.menu_sep = QCheckBox("Show the menu bar (File, Edit, View…) in its own window instead of in the main window")
         self.menu_sep.setChecked(cfg.menu_separate)
         gl.addWidget(self.menu_sep)
+        self.own_bar = QCheckBox("Use the program's own window buttons instead of the system title bar")
+        self.own_bar.setToolTip("Minimise, maximise and close sit in the menu bar's corner, or at the right of the top "
+                                "toolbar row when the menu is in the desktop's panel or in its own window.\n"
+                                "Drag the empty part of the menu bar or of a top toolbar to move the window.")
+        self.own_bar.setChecked(cfg.own_titlebar)
+        gl.addWidget(self.own_bar)
         self.close_tray = QCheckBox("Keep playing in the tray when the window is closed")
         self.close_tray.setChecked(cfg.close_to_tray)
         self.write_rt = QCheckBox("Write star ratings into local files' tags"); self.write_rt.setChecked(cfg.write_ratings)
@@ -452,7 +458,7 @@ class SettingsDialog(QDialog):
         c.sync_interval_min, c.sync_on_start = self.interval.value(), self.on_start.isChecked()
         c.scrobble, c.max_bitrate = self.scrobble.isChecked(), self.bitrate.currentData()
         c.show_tray, c.close_to_tray = self.tray.isChecked(), self.close_tray.isChecked()
-        c.menu_separate = self.menu_sep.isChecked()
+        c.menu_separate = self.menu_sep.isChecked(); c.own_titlebar = self.own_bar.isChecked()
         c.server_folders, names = self.chosen_server_folders()
         if names:
             c.server_folder_names = names
