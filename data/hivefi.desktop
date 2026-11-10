@@ -3,5 +3,5 @@ Type=Application
 Name=Hivefi
 Comment=Music manager and player with Navidrome sync
 Exec=hivefi
-Icon=multimedia-audio-player
+Icon=hivefi
 Categories=AudioVideo;Audio;Player;

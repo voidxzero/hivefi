@@ -14,3 +14,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["hivefi", "hivefi.ui"]
+
+[tool.setuptools.package-data]
+hivefi = ["*.svg"]

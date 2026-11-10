@@ -20,4 +20,5 @@ package() {
   cd "$startdir/../.."
   python -m installer --destdir="$pkgdir" "$srcdir"/dist/*.whl
   install -Dm644 data/hivefi.desktop "$pkgdir/usr/share/applications/hivefi.desktop"
+  install -Dm644 hivefi/hivefi.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/hivefi.svg"
 }

@@ -128,3 +128,9 @@ def toggle_icon(kind: str) -> QIcon:
 def icon(widget, sp) -> QIcon:
     return media_icon(sp) or widget.style().standardIcon(sp)
 
+
+
+def app_icon() -> QIcon:
+    """Hivefi's own icon: a honeycomb cell with a note (hivefi/hivefi.svg)."""
+    from pathlib import Path
+    return QIcon(str(Path(__file__).resolve().parent.parent / "hivefi.svg"))

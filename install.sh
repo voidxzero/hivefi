@@ -26,7 +26,8 @@ fi
 python3 -m venv --system-site-packages .venv
 .venv/bin/pip install -e . 
 
-mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
+mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications" "$HOME/.local/share/icons/hicolor/scalable/apps"
 ln -sf "$PWD/.venv/bin/hivefi" "$HOME/.local/bin/hivefi"
 sed "s|^Exec=.*|Exec=$PWD/.venv/bin/hivefi|" data/hivefi.desktop > "$HOME/.local/share/applications/hivefi.desktop"
+cp hivefi/hivefi.svg "$HOME/.local/share/icons/hicolor/scalable/apps/hivefi.svg"
 echo "Installed. Launch 'Hivefi' from your app menu or run: hivefi (~/.local/bin must be on PATH)"

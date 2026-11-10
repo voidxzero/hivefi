@@ -2149,7 +2149,7 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         self.tray = None
         if not (self.cfg.show_tray and QSystemTrayIcon.isSystemTrayAvailable()):
             return
-        icon = QIcon.fromTheme("multimedia-audio-player", self._icon(QStyle.StandardPixmap.SP_MediaPlay))
+        icon = icons.app_icon()
         self.tray = QSystemTrayIcon(icon, self); self.tray.setToolTip("Hivefi")
         m = QMenu()
         m.addAction("Play/Pause", self.player.toggle); m.addAction("Next", self.player.next)
@@ -2603,6 +2603,7 @@ def main():
     app = QApplication(sys.argv)
     install_crash_log()
     app.setApplicationName("hivefi"); app.setDesktopFileName("hivefi")
+    app.setWindowIcon(icons.app_icon())
     cfg = Config.load()
     skins.apply_skin(app, cfg.skin)
     db = Database(data_dir() / "library.db")
