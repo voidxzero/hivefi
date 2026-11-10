@@ -65,6 +65,10 @@ class Worker(QThread):
             self.failed.emit(str(e))
 
 
+_ORPHANS: list = []          # workers still waiting on the network when their window closed (see closeEvent)
+_RUNNING: set = set()        # every worker thread until it has finished (see MainWindow._run)
+
+
 class SourceTree(QTreeWidget):
     """Source tree that accepts track drops onto playlists."""
     tracksDropped = pyqtSignal(int, list)
@@ -2304,6 +2308,11 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
 
     # --------------------------------------------------- background jobs
     def _run(self, w: Worker):
+        # A running QThread that is destroyed aborts the whole program, and a child thread is destroyed with its
+        # window. So a worker belongs to nobody and is kept alive here until it has finished, whatever happens to
+        # the window meanwhile (closed during a slow request, or simply dropped).
+        w.setParent(None); _RUNNING.add(w)
+        w.finished.connect(lambda w=w: _RUNNING.discard(w))
         self._workers.add(w)
         w.finished.connect(lambda: self._workers.discard(w))
         w.start()
@@ -2314,10 +2323,19 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         elif self.cfg.library_dirs:
             self.scan_library(quiet=True)
         if self.api and self.cfg.sync_on_start:
-            self.sync_now(silent=True)
+            if self.cfg.sync_start_ask:
+                QTimer.singleShot(0, self._ask_startup_sync)      # once the window is up
+            else:
+                self.sync_now(silent=True)
         self._refresh_podcasts(quiet=True)
         if self.cfg.check_updates and not os.environ.get("HIVEFI_NO_UPDATE_CHECK"):
             self.check_updates()
+
+    def _ask_startup_sync(self):
+        a = QMessageBox.question(self, "Sync", "Sync with the Navidrome server now?\n\n"
+                                 "(Settings → Navidrome / Subsonic → \"When the app starts\" changes this question.)")
+        if a == QMessageBox.StandardButton.Yes and self.api:
+            self.sync_now(silent=True)
 
     # --------------------------------------------------- self-update
     def check_updates(self, manual=False):
@@ -2415,6 +2433,25 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         super().showEvent(e)
         QTimer.singleShot(0, self._apply_titlebar)               # only now is it known whether the menu bar is in the window
 
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        self._title_filter_on(False)
+
+    def _title_filter_on(self, on):
+        """The application-wide event filter for dragging and resizing the frameless window. It is installed only
+        while the window is on screen: left on a window that was closed or never shown, events reached a dead object
+        when the program ended and it crashed on exit."""
+        if bool(on) == getattr(self, "_title_filter", False):
+            return
+        self._title_filter = bool(on)
+        app = QApplication.instance()
+        if on:
+            self.menuBar().installEventFilter(self); app.installEventFilter(self)
+        else:
+            self.menuBar().removeEventFilter(self); app.removeEventFilter(self)
+            if getattr(self, "_edge_cursor", False):
+                QApplication.restoreOverrideCursor(); self._edge_cursor = False
+
     def _menu_in_window(self):
         """False with the menu in its own window or taken by the desktop (global menu in the panel, as on KDE or
         macOS): the menu bar's corner is then not on screen and the window buttons go to the top toolbar row."""
@@ -2448,10 +2485,7 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         if tb is not None:
             tb.setVisible(own and not in_menu)
             self._place_window_toolbar()
-        own_filter = own and not getattr(self, "_title_filter", False)
-        if own_filter:
-            self._title_filter = True
-            self.menuBar().installEventFilter(self); QApplication.instance().installEventFilter(self)
+        self._title_filter_on(own and self.isVisible())           # only while on screen, see _title_filter_on
         own = in_menu                                              # below: the menu bar's corner
         frameless = bool(self.cfg.own_titlebar)
         was = bool(self.windowFlags() & Qt.WindowType.FramelessWindowHint)
@@ -2541,8 +2575,14 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
 
     def open_settings(self):
         dlg = SettingsDialog(self.cfg, self)
+        scale = self.cfg.ui_scale
         if dlg.exec():
             dlg.apply(); self._rebuild_api(); self._apply_sync_timer()
+            if self.cfg.ui_scale != scale:
+                self.cfg.save()
+                if QMessageBox.question(self, "Interface scale", f"The interface scale ({self.cfg.ui_scale} %) takes effect "
+                                        "when Hivefi starts.\n\nRestart now?") == QMessageBox.StandardButton.Yes:
+                    self.restart_requested = True; self._quit(); return
             self.player.configure(); self._update_vis_availability(); self._setup_watch(); self._apply_menu_mode(); self._apply_titlebar()
             sortkey.set_articles(self.cfg.ignore_articles); self.load_source(keep=True)
             self._after_library_change()
@@ -2555,13 +2595,25 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
             if getattr(self, "menu_win", None): self.menu_win.hide()
             return
         self._closing = True                                     # lets a running scan stop early
+        self._title_filter_on(False)
         if getattr(self, "menu_win", None): self.menu_win.close()
         self._save_session()
+        if getattr(self, "_autosave", None) is not None: self._autosave.stop()
         if self.tray: self.tray.hide()
         self.mini.hide()
         self.player.mp.shutdown()
         self.player.stop()
-        for w in list(self._workers): w.wait(2000)
+        for v in (self.grid, self.album_view, self.artist_list):  # covers still queued are not needed any more
+            v._current[0] = -1; v.pool.clear()
+        deadline = time.monotonic() + 4.0
+        for w in list(self._workers):
+            w.wait(max(1, int((deadline - time.monotonic()) * 1000)))
+        for w in list(self._workers):
+            if w.isRunning():                                    # stuck on the network: destroying a running QThread
+                w.setParent(None); _ORPHANS.append(w)            # with its window aborts the whole program
+                for sig in (w.done, w.failed, w.progress):
+                    try: sig.disconnect()
+                    except TypeError: pass
         super().closeEvent(e)
 
 
@@ -2599,7 +2651,19 @@ def install_crash_log(path=None):
     return path
 
 
+def apply_ui_scale(cfg, env=os.environ):
+    """Settings -> General -> Interface scale: Qt reads the factor once, before the application object exists. A
+    marker remembers that the variable is ours, so going back to 100 % (after the restart) removes it again while a
+    QT_SCALE_FACTOR the user set themselves is left alone."""
+    pct = max(50, min(300, int(getattr(cfg, "ui_scale", 100) or 100)))
+    if pct != 100:
+        env["QT_SCALE_FACTOR"] = f"{pct / 100:g}"; env["HIVEFI_UI_SCALE"] = "1"
+    elif env.pop("HIVEFI_UI_SCALE", None):
+        env.pop("QT_SCALE_FACTOR", None)
+
+
 def main():
+    apply_ui_scale(Config.load())
     app = QApplication(sys.argv)
     install_crash_log()
     app.setApplicationName("hivefi"); app.setDesktopFileName("hivefi")
@@ -2610,6 +2674,8 @@ def main():
     win = MainWindow(cfg, db)
     win.show()
     code = app.exec()
+    if any(w.isRunning() for w in _ORPHANS) and not win.restart_requested:
+        os._exit(code)                              # a request that never returned must not hold up (or abort) the exit
     if win.restart_requested:                       # update installed: relaunch the new code
         os.chdir(updater.ROOT)
         os.execv(sys.executable, [sys.executable, "-m", "hivefi", *sys.argv[1:]])

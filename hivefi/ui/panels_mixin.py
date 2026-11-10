@@ -591,5 +591,6 @@ class PanelsMixin:
             self.statusBar().showMessage(f"Could not restore the last session: {e}", 6000)
 
     def _start_autosave(self):
-        self._autosave = QTimer(self, interval=30_000, timeout=self._save_session)
+        self._autosave = QTimer(self, interval=30_000,           # never from a window that is closing or closed
+                                timeout=lambda: self._closing or self._save_session())
         self._autosave.start()

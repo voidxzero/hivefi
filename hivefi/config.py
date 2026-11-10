@@ -39,6 +39,7 @@ class Config:
     username: str = ""
     password: str = ""
     sync_on_start: bool = True
+    sync_start_ask: bool = False         # with sync_on_start: ask before the startup sync instead of just running it
     sync_interval_min: int = 15          # 0 = manual only
     scrobble: bool = True
     max_bitrate: int = 0                 # 0 = original / no transcoding
@@ -77,6 +78,7 @@ class Config:
     eq_preset: str = "Flat"
     eq_gains: list = field(default_factory=lambda: [0.0] * 10)   # for the current eq_bands layout
     eq_preamp: float = 0.0
+    eq_auto_preamp: bool = True          # keep the preamp at minus the peak of the curve (no clipping)
     eq_user_presets: dict = field(default_factory=dict)          # name -> {"bands": n, "gains": [...]}
     libraries_off: list = field(default_factory=list)   # "navidrome" and/or local folder paths that are switched off
     auto_dj: bool = False
@@ -90,6 +92,7 @@ class Config:
     view_mode: str = "albums"            # browser | albums
     list_mode: str = "albums"            # details | albums (the track list as Album and Tracks)
     show_tray: bool = True
+    ui_scale: int = 100                  # percent; applied when the program starts (QT_SCALE_FACTOR)
     own_titlebar: bool = True            # window buttons inside the program (no system title bar)
     menu_separate: bool = False          # File / Edit / View... bar in its own small window instead of the main window
     close_to_tray: bool = False

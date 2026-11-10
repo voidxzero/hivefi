@@ -235,7 +235,11 @@ class SettingsDialog(QDialog):
         self.pw = QLineEdit(cfg.password); self.pw.setEchoMode(QLineEdit.EchoMode.Password)
         self.interval = QSpinBox(); self.interval.setRange(0, 1440); self.interval.setSuffix(" min (0 = manual)")
         self.interval.setValue(cfg.sync_interval_min)
-        self.on_start = QCheckBox("Sync when the app starts"); self.on_start.setChecked(cfg.sync_on_start)
+        self.on_start = QComboBox()
+        for text, mode in (("Sync automatically", "auto"), ("Ask first", "ask"), ("Don't sync", "off")):
+            self.on_start.addItem(text, mode)
+        self.on_start.setCurrentIndex(2 if not cfg.sync_on_start else 1 if cfg.sync_start_ask else 0)
+        self.on_start.setToolTip("What to do about the Navidrome sync each time Hivefi starts")
         self.scrobble = QCheckBox("Scrobble plays to the server"); self.scrobble.setChecked(cfg.scrobble)
         self.bitrate = QComboBox()
         for label, v in (("Original (no transcoding)", 0), ("320 kbps", 320), ("192 kbps", 192), ("128 kbps", 128)):
@@ -254,7 +258,7 @@ class SettingsDialog(QDialog):
         f.addRow(self.enabled)
         f.addRow("Libraries to sync", self.server_libs)
         f.addRow(load, self.libs_status)
-        f.addRow(self.on_start); f.addRow(self.scrobble); f.addRow(test, self.status)
+        f.addRow("When the app starts:", self.on_start); f.addRow(self.scrobble); f.addRow(test, self.status)
         tabs.addTab(srv, "Navidrome / Subsonic")
 
         gen = QWidget(); gl = QVBoxLayout(gen)
@@ -268,6 +272,13 @@ class SettingsDialog(QDialog):
                                 "Drag the empty part of the menu bar or of a top toolbar to move the window.")
         self.own_bar.setChecked(cfg.own_titlebar)
         gl.addWidget(self.own_bar)
+        self.ui_scale = QComboBox()
+        for pct in sorted({75, 90, 100, 110, 125, 150, 175, 200, int(cfg.ui_scale)}):
+            self.ui_scale.addItem(f"{pct} %", pct)
+        self.ui_scale.setCurrentIndex(self.ui_scale.findData(int(cfg.ui_scale)))
+        self.ui_scale.setToolTip("Size of everything in the program (text, buttons, covers). Takes effect after a restart.")
+        srow = QHBoxLayout(); srow.addWidget(QLabel("Interface scale:")); srow.addWidget(self.ui_scale); srow.addStretch()
+        gl.addLayout(srow)
         self.close_tray = QCheckBox("Keep playing in the tray when the window is closed")
         self.close_tray.setChecked(cfg.close_to_tray)
         self.write_rt = QCheckBox("Write star ratings into local files' tags"); self.write_rt.setChecked(cfg.write_ratings)
@@ -455,10 +466,12 @@ class SettingsDialog(QDialog):
         c.library_dirs = self.folders()
         c.libraries_off = self.disabled_folders() + ([] if self.enabled.isChecked() else [c.NAVIDROME])
         c.server_url, c.username, c.password = self.url.text().strip(), self.user.text().strip(), self.pw.text()
-        c.sync_interval_min, c.sync_on_start = self.interval.value(), self.on_start.isChecked()
+        c.sync_interval_min, c.sync_on_start = self.interval.value(), self.on_start.currentData() != "off"
+        c.sync_start_ask = self.on_start.currentData() == "ask"
         c.scrobble, c.max_bitrate = self.scrobble.isChecked(), self.bitrate.currentData()
         c.show_tray, c.close_to_tray = self.tray.isChecked(), self.close_tray.isChecked()
         c.menu_separate = self.menu_sep.isChecked(); c.own_titlebar = self.own_bar.isChecked()
+        c.ui_scale = int(self.ui_scale.currentData())
         c.server_folders, names = self.chosen_server_folders()
         if names:
             c.server_folder_names = names

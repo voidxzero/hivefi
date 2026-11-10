@@ -52,7 +52,10 @@ class EqualizerPanel(QWidget):
         self.preset = QComboBox()
         self.btn_save, self.btn_del = QPushButton("Save…"), QPushButton("Delete")
         self.btn_reset, self.btn_auto = QPushButton("Reset"), QPushButton("Auto preamp")
-        self.btn_auto.setToolTip("Lower the preamp by the highest point of the whole curve (neighbouring bands add up) so the EQ cannot clip")
+        self.btn_auto.setCheckable(True); self.btn_auto.setChecked(bool(cfg.eq_auto_preamp))
+        self.btn_auto.setToolTip("While on, the preamp follows the curve: it is lowered by the highest point of the whole "
+                                 "curve (neighbouring bands add up) so the EQ cannot clip.\n"
+                                 "Moving the Pre slider yourself turns this off.")
         self.shelf = QCheckBox("Shelving end bands"); self.shelf.setChecked(cfg.eq_shelf_ends)
         self.shelf.setToolTip("Lowest/highest band act as low/high shelves instead of peaking filters")
         row1 = QHBoxLayout()
@@ -83,7 +86,7 @@ class EqualizerPanel(QWidget):
         self.btn_save.clicked.connect(self._save_preset)
         self.btn_del.clicked.connect(self._delete_preset)
         self.btn_reset.clicked.connect(self._reset)
-        self.btn_auto.clicked.connect(self._auto_preamp)
+        self.btn_auto.toggled.connect(self._auto_toggled)
         self._sync_buttons()
 
     # ---- layout
@@ -161,6 +164,9 @@ class EqualizerPanel(QWidget):
     def _slider_moved(self, _i):
         if self._loading:
             return
+        if _i == 0 and self.btn_auto.isChecked():              # a hand-set preamp: stop following the curve
+            self.btn_auto.blockSignals(True); self.btn_auto.setChecked(False); self.btn_auto.blockSignals(False)
+            self.cfg.eq_auto_preamp = False
         self._labels()
         match = next((n for n, g in self.all_presets().items()
                       if [float(x) for x in g] == self.gains()), CUSTOM)
@@ -194,10 +200,21 @@ class EqualizerPanel(QWidget):
         self._loading = True; self.preset.setCurrentText("Flat"); self._loading = False
         self._sync_buttons()
 
-    def _auto_preamp(self):
+    def _auto_value(self) -> int:
+        """The Pre slider position (half dB) that offsets the peak of the whole curve: bands add up."""
         from ..audio import eq_peak_db
-        boost = eq_peak_db(self.n, self.gains(), self.shelf.isChecked())    # of the whole curve: bands add up
-        self.sliders[0].setValue(-math.ceil(boost * 2 - 1e-6))
+        return -math.ceil(eq_peak_db(self.n, self.gains(), self.shelf.isChecked()) * 2 - 1e-6)
+
+    def _auto_preamp(self):
+        """Set the preamp from the curve once."""
+        was, self._loading = self._loading, True
+        self.sliders[0].setValue(self._auto_value())
+        self._loading = was
+        self._labels(); self._emit()
+
+    def _auto_toggled(self, on):
+        self.cfg.eq_auto_preamp = bool(on)
+        self._emit() if on else self.persist.emit()
 
     def _sync_buttons(self):
         self.btn_del.setEnabled(self.preset.currentText() in self.cfg.eq_user_presets)
@@ -207,6 +224,9 @@ class EqualizerPanel(QWidget):
         if self._loading:
             return
         c = self.cfg
+        if self.btn_auto.isChecked() and self.sliders[0].value() != self._auto_value():
+            self._loading = True; self.sliders[0].setValue(self._auto_value()); self._loading = False
+            self._labels()
         c.eq_enabled = self.enable.isChecked()
         c.eq_bands, c.eq_gains, c.eq_preamp = self.n, self.gains(), self.preamp()
         c.eq_preset, c.eq_shelf_ends = self.preset.currentText(), self.shelf.isChecked()

@@ -18,6 +18,9 @@ def wait(ms):
     l = QEventLoop(); QTimer.singleShot(ms, l.quit); l.exec()
 
 
+_APP: list = []
+
+
 @pytest.fixture
 def win(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
@@ -27,6 +30,8 @@ def win(tmp_path, monkeypatch):
                         f"title=L{i}", "-metadata", "artist=Local", "-metadata", "album=LA", str(music / f"{i}.flac")], check=True)
     st = State(); srv = make_server(st)
     app = QApplication.instance() or QApplication([])
+    _APP.append(app)       # one application for the whole run: dropping the last reference deleted it after each test,
+                           # under windows that were still alive, and that crashed now and then
     skins.apply_skin(app, "Dark")
     cfg = Config(); cfg._path = tmp_path / "c.json"; cfg.library_dirs = [str(music)]
     cfg.server_url = f"http://127.0.0.1:{srv.server_port}"; cfg.username, cfg.password = "u", "pw"
@@ -116,10 +121,18 @@ def test_equalizer_panel(win):
     w = win; ep = w.eq_panel; w.show_equalizer()
     ep.preset.setCurrentText("Rock")
     assert ep.gains() == [4, 3, 2, -1, -2, -1, 2, 3, 4, 5]
+    assert ep.btn_auto.isChecked() and ep.preamp() <= -5 and w.cfg.eq_preamp == ep.preamp()   # auto preamp follows the curve
+    ep.preset.setCurrentText("Flat"); assert ep.preamp() == 0
+    ep.preset.setCurrentText("Rock"); rock_pre = ep.preamp(); assert rock_pre <= -5
     ep.sliders[3].setValue(0)                                           # band 2 moved -> custom curve
     assert ep.preset.currentText() == "Custom" and ep.gains()[2] == 0
     assert w.cfg.eq_gains == ep.gains()
     ep.sliders[0].setValue(-6); assert ep.preamp() == -3 and w.cfg.eq_preamp == -3
+    assert not ep.btn_auto.isChecked() and not w.cfg.eq_auto_preamp     # a hand-set preamp turns the following off
+    ep.sliders[1].setValue(ep.sliders[1].value() + 2); assert ep.preamp() == -3
+    ep.sliders[1].setValue(ep.sliders[1].value() - 2)
+    ep.btn_auto.setChecked(True); assert w.cfg.eq_auto_preamp and ep.preamp() < -3 and w.cfg.eq_preamp == ep.preamp()
+    ep.btn_auto.setChecked(False)
     ep._auto_preamp(); assert -12 <= ep.preamp() <= -max(ep.gains())    # auto preamp offsets the peak of the whole curve
     auto_pre = ep.preamp()
     # switching layout keeps the curve's shape
