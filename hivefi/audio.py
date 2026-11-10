@@ -79,6 +79,39 @@ def configure_equalizer(eq, n: int, gains, shelf_ends=False):
         band.set_property("type", 1 if (shelf_ends and i == 0) else 2 if (shelf_ends and i == n - 1) else 0)
 
 
+def eq_peak_db(n: int, gains, shelf_ends=False, rate=48000.0) -> float:
+    """The largest boost (dB, >= 0) of the whole equalizer curve. Neighbouring bands overlap and add up, so this is
+    more than the highest slider: Bass Boost (6, 5, 4, 2 dB) peaks at about +7 dB. The auto preamp lowers by this."""
+    import cmath
+    freqs = EQ_LAYOUTS[n]
+    sections = []
+    for i, f in enumerate(freqs):
+        g = float(max(-24.0, min(12.0, gains[i] if i < len(gains) else 0.0)))
+        if not g:
+            continue
+        w0 = 2 * math.pi * min(f, rate * 0.49) / rate
+        A = 10 ** (g / 40)
+        if shelf_ends and i in (0, n - 1):                  # RBJ shelf, slope 1
+            cs, al = math.cos(w0), math.sin(w0) / 2 * math.sqrt(2.0)
+            sq = 2 * math.sqrt(A) * al
+            s = 1 if i == 0 else -1                         # low shelf / high shelf
+            b = (A * ((A + 1) - s * (A - 1) * cs + sq), s * 2 * A * ((A - 1) - s * (A + 1) * cs), A * ((A + 1) - s * (A - 1) * cs - sq))
+            a = ((A + 1) + s * (A - 1) * cs + sq, -s * 2 * ((A - 1) + s * (A + 1) * cs), (A + 1) + s * (A - 1) * cs - sq)
+        else:                                               # the peaking band of equalizer-nbands
+            al = math.tan(min(math.pi * 0.49, math.pi * eq_bandwidth_hz(n, f) / rate))
+            b = (1 + al * A, -2 * math.cos(w0), 1 - al * A)
+            a = (1 + al / A, -2 * math.cos(w0), 1 - al / A)
+        sections.append((b, a))
+    peak, steps = 0.0, 480
+    for k in range(steps + 1):
+        f = 10.0 * (rate * 0.45 / 10.0) ** (k / steps)
+        z1 = cmath.exp(-2j * math.pi * f / rate); z2 = z1 * z1
+        db = sum(20 * math.log10(max(1e-9, abs((b[0] + b[1] * z1 + b[2] * z2) / (a[0] + a[1] * z1 + a[2] * z2))))
+                 for b, a in sections)
+        peak = max(peak, db)
+    return peak
+
+
 # --------------------------------------------------------------------------- chain description
 OUT_FORMATS = {"auto": None, "16": "S16LE", "24": "S24_32LE", "32": "S32LE", "float": "F32LE"}
 CROSSFEED = {"default": (700, 45), "cmoy": (700, 60), "jmeier": (650, 95)}   # fcut Hz, feed dB*10
@@ -147,7 +180,10 @@ def chain_description(cfg) -> str:
     if cfg.crossfeed != "off" and have("bs2b"):
         els += ["audioconvert", _caps("audio/x-raw,channels=2"), "bs2b name=bs2b"]
     if cfg.eq_enabled:
-        els += ["audioconvert", f"equalizer-nbands name=eq num-bands={int(cfg.eq_bands)}"]
+        # float samples, and the preamp BEFORE the bands: on integer samples the boosted bands clipped inside the
+        # equalizer and lowering the level afterwards (as before) only made the clipped sound quieter
+        els += ["audioconvert", _caps("audio/x-raw,format=F32LE"), "volume name=pre",
+                f"equalizer-nbands name=eq num-bands={int(cfg.eq_bands)}"]
     if cfg.balance and have("audiopanorama"):
         els += ["audioconvert", "audiopanorama name=pan method=simple"]
     if cfg.limiter and have("audiodynamic"):
@@ -173,6 +209,8 @@ def apply_chain_settings(h: dict, cfg):
     """Push the live-adjustable settings onto a chain's named elements (also used by the tests)."""
     if h.get("eq") is not None:
         configure_equalizer(h["eq"], int(cfg.eq_bands), cfg.eq_gains, cfg.eq_shelf_ends)
+    if h.get("pre") is not None:
+        h["pre"].set_property("volume", 10 ** (float(cfg.eq_preamp) / 20))
     if h.get("rg") is not None:
         h["rg"].set_property("album-mode", cfg.rg_mode == "album")
         h["rg"].set_property("pre-amp", float(cfg.rg_preamp))
@@ -266,7 +304,7 @@ class Deck:
         chain = Gst.parse_bin_from_description(chain_description(cfg), True)
         self.pipe.set_property("audio-filter", chain)
         self.pipe.set_property("audio-sink", make_sink(cfg.output_device, cfg.buffer_ms))
-        self.h = {n: chain.get_by_name(n) for n in ("rg", "eq", "swap", "bs2b", "pan", "dyn", "fade",
+        self.h = {n: chain.get_by_name(n) for n in ("rg", "eq", "pre", "swap", "bs2b", "pan", "dyn", "fade",
                                                      "resamp", "outconv", "inconv", "spec", "lvl") if chain.get_by_name(n)}
         self.sig = chain_signature(cfg)
         self.level = 1.0
@@ -455,7 +493,7 @@ class GstEngine(QObject):
     # ----------------------------------------------------------------- settings / volume
     def set_volume(self, v: float):
         self._volume = float(v)
-        eff = 1.0 if self.cfg.bit_perfect else self._volume * 10 ** (self.cfg.eq_preamp / 20 if self.cfg.eq_enabled else 0)
+        eff = 1.0 if self.cfg.bit_perfect else self._volume       # the EQ preamp is its own element, before the bands
         for d in self.decks:
             d.set_volume(eff)
 
@@ -628,7 +666,7 @@ class GstEngine(QObject):
         if clock is not None:
             now = clock.get_time() - cur.pipe.get_base_time()
         due, keep = [], []
-        off = self._vis_off
+        off = getattr(self, "_vis_off", 0)
         for e in q:
             deck, end, _name, _m = e
             if deck is not cur:

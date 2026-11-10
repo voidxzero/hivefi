@@ -66,7 +66,7 @@ def measure(chain_cfg=None, eq=None, freq=1000, left_only=True, extra=""):
                          f"{audio.chain_description(cfg)} ! level interval=100000000 ! fakesink sync=false")
     if eq:
         cfg.eq_gains = eq
-    handles = {n: p.get_by_name(n) for n in ("rg", "eq", "swap", "bs2b", "pan", "dyn", "resamp") if p.get_by_name(n)}
+    handles = {n: p.get_by_name(n) for n in ("rg", "eq", "pre", "swap", "bs2b", "pan", "dyn", "resamp") if p.get_by_name(n)}
     audio.apply_chain_settings(handles, cfg)          # exactly what a live deck does
     p.set_state(Gst.State.PLAYING); bus = p.get_bus(); vals = []
     while True:
@@ -338,3 +338,32 @@ def test_analyser_results_wait_until_their_audio_is_heard():
     eng._state = audio.PS.PlayingState
     pipe.get_clock = lambda: None                              # no clock at all: passed on at once, as before
     assert due()[0] is not None
+
+
+def test_eq_auto_preamp_never_clips():
+    """Neighbouring bands add up (Bass Boost peaks well above its +6 slider) and the preamp sits before the bands on
+    float samples: a full-scale 16-bit tone at the worst frequency comes out at full scale or below, undistorted."""
+    bass = [6, 5, 4, 2, 0, 0, 0, 0, 0, 0]
+    peak = audio.eq_peak_db(10, bass)
+    assert 6.5 < peak < 12.0                                   # more than the highest slider
+    assert audio.eq_peak_db(10, [0] * 10) == 0 and audio.eq_peak_db(10, [-6] * 10) == 0
+    assert abs(audio.eq_peak_db(10, [0, 0, 0, 0, 0, 6, 0, 0, 0, 0]) - 6) < 0.2      # a single band is its own gain
+    cfg = Config(); cfg.eq_enabled = True; cfg.rg_mode = "off"; cfg.eq_gains = bass
+    cfg.eq_preamp = -math.ceil(peak * 2) / 2
+    worst = -99.0
+    for freq in (30, 40, 50, 63, 80, 100, 125):
+        p = Gst.parse_launch(f"audiotestsrc freq={freq} volume=1.0 num-buffers=30 samplesperbuffer=4410 ! "
+                             f"audio/x-raw,format=S16LE,rate=44100,channels=2 ! {audio.chain_description(cfg)} ! "
+                             "audioconvert ! audio/x-raw,format=F32LE ! level interval=100000000 ! fakesink sync=false")
+        audio.apply_chain_settings({n: p.get_by_name(n) for n in ("eq", "pre") if p.get_by_name(n)}, cfg)
+        p.set_state(Gst.State.PLAYING); bus = p.get_bus(); peaks = []
+        while True:
+            m = bus.timed_pop_filtered(5 * Gst.SECOND, Gst.MessageType.ELEMENT | Gst.MessageType.EOS | Gst.MessageType.ERROR)
+            if m is None or m.type != Gst.MessageType.ELEMENT:
+                break
+            st = m.get_structure()
+            if st.get_name() == "level":
+                peaks.append(max(st.get_value("peak")))
+        p.set_state(Gst.State.NULL)
+        worst = max(worst, max(peaks[5:]))                     # after the filters have settled
+    assert -1.5 < worst <= 0.05, worst                         # the loudest point lands just under full scale

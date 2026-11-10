@@ -120,12 +120,13 @@ def test_equalizer_panel(win):
     assert ep.preset.currentText() == "Custom" and ep.gains()[2] == 0
     assert w.cfg.eq_gains == ep.gains()
     ep.sliders[0].setValue(-6); assert ep.preamp() == -3 and w.cfg.eq_preamp == -3
-    ep._auto_preamp(); assert ep.preamp() == -max(ep.gains())           # auto preamp offsets the biggest boost
+    ep._auto_preamp(); assert -12 <= ep.preamp() <= -max(ep.gains())    # auto preamp offsets the peak of the whole curve
+    auto_pre = ep.preamp()
     # switching layout keeps the curve's shape
     ep.layout_box.setCurrentIndex(ep.layout_box.findData(31))
     assert w.cfg.eq_bands == 31 and len(w.cfg.eq_gains) == 31 and len(ep.sliders) == 32
     assert abs(w.cfg.eq_gains[0] - 4) <= 1 and abs(w.cfg.eq_gains[-1] - 5) <= 1
-    assert w.cfg.eq_preamp == -max([0.0] + [4, 3, 0, -1, -2, -1, 2, 3, 4, 5])      # preamp survives a layout change
+    assert w.cfg.eq_preamp == auto_pre                                  # preamp survives a layout change
     ep.preset.setCurrentText("Flat"); assert set(ep.gains()) == {0.0}
     ep.layout_box.setCurrentIndex(ep.layout_box.findData(15)); assert len(ep.sliders) == 16
     # user presets are stored with their layout and re-interpolated for other layouts

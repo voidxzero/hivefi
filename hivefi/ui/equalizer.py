@@ -1,4 +1,6 @@
 """Graphic equalizer panel: 10 / 15 / 31 bands, presets, preamp. Mutates the config, then emits `changed`."""
+import math
+
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QPushButton,
                              QScrollArea, QSlider, QVBoxLayout, QWidget)
@@ -50,7 +52,7 @@ class EqualizerPanel(QWidget):
         self.preset = QComboBox()
         self.btn_save, self.btn_del = QPushButton("Save…"), QPushButton("Delete")
         self.btn_reset, self.btn_auto = QPushButton("Reset"), QPushButton("Auto preamp")
-        self.btn_auto.setToolTip("Lower the preamp by the largest boost so the EQ cannot clip")
+        self.btn_auto.setToolTip("Lower the preamp by the highest point of the whole curve (neighbouring bands add up) so the EQ cannot clip")
         self.shelf = QCheckBox("Shelving end bands"); self.shelf.setChecked(cfg.eq_shelf_ends)
         self.shelf.setToolTip("Lowest/highest band act as low/high shelves instead of peaking filters")
         row1 = QHBoxLayout()
@@ -193,8 +195,9 @@ class EqualizerPanel(QWidget):
         self._sync_buttons()
 
     def _auto_preamp(self):
-        boost = max([0.0] + self.gains())
-        self.sliders[0].setValue(round(-boost * 2))
+        from ..audio import eq_peak_db
+        boost = eq_peak_db(self.n, self.gains(), self.shelf.isChecked())    # of the whole curve: bands add up
+        self.sliders[0].setValue(-math.ceil(boost * 2 - 1e-6))
 
     def _sync_buttons(self):
         self.btn_del.setEnabled(self.preset.currentText() in self.cfg.eq_user_presets)

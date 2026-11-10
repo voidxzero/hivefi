@@ -8,6 +8,7 @@ from PyQt6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPixmap
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
 from .. import art, vizfx
+from .album_tracks import album_key
 from .models import fmt_time
 from .panels import blurred
 from .viz_fullscreen import FullscreenVisualizer
@@ -124,7 +125,22 @@ class NowPlayingPage(QWidget):
         self.update()
 
     def _key(self, t):
-        return t.get("_ak") or t.get("cover_id") or t.get("id")
+        return album_key(t)
+
+    def _fan(self):
+        """Up to three earlier tracks of the queue for the covers behind the current one, nearest first: one per
+        album, and never the album that is playing (its cover is already shown)."""
+        P = self.win.player
+        if not P.queue or P.index is None or not 0 <= P.index < len(P.queue):
+            return []
+        seen, out = {self._key(P.queue[P.index])}, []
+        for i in range(P.index - 1, max(-1, P.index - 200), -1):
+            k = self._key(P.queue[i])
+            if k not in seen:
+                seen.add(k); out.append(P.queue[i])
+                if len(out) == 3:
+                    break
+        return out
 
     def _track_changed(self, _t=None):
         self._want_neighbours(); self.update()
@@ -132,17 +148,15 @@ class NowPlayingPage(QWidget):
     def _want_neighbours(self):
         P = self.win.player
         from .main_window import Worker
-        for k in range(1, 4):
-            i = P.index - k
-            if 0 <= i < len(P.queue):
-                t = P.queue[i]; key = self._key(t)
-                if key in self.covers or key in self._asked:
-                    continue
-                self._asked.add(key)
-                tc, api = dict(t), self.win.api
-                w = Worker(lambda _p, tc=tc, api=api: art.get_art(tc, api, 400), self)
-                w.done.connect(lambda data, key=key: self._got(key, data))
-                self.win._run(w)
+        for t in self._fan():
+            key = self._key(t)
+            if key in self.covers or key in self._asked:
+                continue
+            self._asked.add(key)
+            tc, api = dict(t), self.win.api
+            w = Worker(lambda _p, tc=tc, api=api: art.get_art(tc, api, 400), self)
+            w.done.connect(lambda data, key=key: self._got(key, data))
+            self.win._run(w)
 
     def _got(self, key, data):
         pm = QPixmap()
@@ -198,11 +212,9 @@ class NowPlayingPage(QWidget):
         x0, y0 = int(w * 0.17), 56
         step = min(int(side * 0.30), max(0, (x0 - 16) // 3))    # the fan stays inside the window
         # previous covers fanned out behind the current one, each smaller and darker
-        for k in range(3, 0, -1):
-            i = P.index - k
-            if not (0 <= i < len(P.queue)):
-                continue
-            pm = self.covers.get(self._key(P.queue[i]))
+        fan = self._fan()
+        for k in range(len(fan), 0, -1):
+            pm = self.covers.get(self._key(fan[k - 1]))
             s = int(side * (1 - 0.13 * k))
             r = QRect(x0 - step * k, y0 + (side - s) // 2, s, s)
             if pm is not None:

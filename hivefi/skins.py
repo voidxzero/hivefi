@@ -272,6 +272,31 @@ def grouped(skin_map: dict | None = None) -> dict:
     return {c: names for c, names in out.items() if names}
 
 
+def _tabs_qss(t: dict, r) -> str:
+    """The library tabs of the gradient skins: flat labels, the open one lifted with an accent line (no boxes), and
+    flat Back / Forward / + buttons beside them."""
+    hover = _mix(t['panel_top'], t['text'], 0.10)
+    return f"""
+QTabBar#library_tabs {{ background: transparent; }}
+QTabBar#library_tabs::tab {{ background: transparent; color: {t['dim']}; border: 0; border-bottom: 2px solid transparent;
+    padding: 6px 6px 4px 14px; margin: 2px 1px 0 1px; border-top-left-radius: {r}px; border-top-right-radius: {r}px; }}
+QTabBar#library_tabs::tab:hover {{ background: {hover}; color: {t['text']}; }}
+QTabBar#library_tabs::tab:selected {{ background: {t['panel_top']}; color: {t['text']};
+    border-bottom: 2px solid {t['accent']}; }}
+QToolBar QToolButton#tab_close {{ color: {t['dim']}; }}
+QToolBar QToolButton#tab_close:hover {{ color: {t['text']}; }}
+QToolBar QToolButton#new_tab, QToolBar QToolButton#nav_back, QToolBar QToolButton#nav_fwd {{ background: transparent;
+    border: 0; border-radius: {r}px; padding: 4px 8px; color: {t['text']}; }}
+QToolBar QToolButton#new_tab {{ font-size: 16px; font-weight: bold; padding: 2px 18px 2px 8px; }}
+QToolBar QToolButton#new_tab:hover, QToolBar QToolButton#nav_back:hover, QToolBar QToolButton#nav_fwd:hover,
+QToolBar QToolButton#new_tab::menu-button:hover {{ background: {hover}; }}
+QToolBar QToolButton#nav_back:disabled, QToolBar QToolButton#nav_fwd:disabled {{ color: {_mix(t['panel_top'], t['dim'], 0.5)}; }}
+QToolBar QToolButton#new_tab::menu-button {{ border: 0; background: transparent; width: 16px;
+    border-top-right-radius: {r}px; border-bottom-right-radius: {r}px; }}
+QToolBar QToolButton#new_tab::menu-arrow {{ image: url("{_glyph('down', t['dim'])}"); width: 9px; height: 9px; }}
+"""
+
+
 def _glow_qss(t: dict) -> str:
     """MusicBee with the cover's colours blurred behind everything (the window paints it): every panel is see-through,
     tabs are pills, the player bar is a dark glass strip."""
@@ -453,6 +478,7 @@ QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{ backgr
 QToolTip {{ background: {t['panel_top']}; border: 1px solid {bd}; padding: 4px 6px; }}
 QStatusBar QPushButton, QStatusBar QToolButton {{ padding: 2px 8px; }}
 QListWidget#albumgrid::item {{ padding: 0; }}
+{_tabs_qss(t, r) if not old else ''}
 QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit, QTimeEdit {{ background: {t['base']}; color: {t['text']};
     border: 1px solid {bd}; border-radius: {r}px; padding: 3px 6px; min-height: 18px; }}
 QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {{ border-color: {_mix(bd, t['accent'], 0.5)}; }}
