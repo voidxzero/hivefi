@@ -12,6 +12,7 @@ def labels(w):
 
 def test_tabs_keep_their_own_view(win):
     w = win
+    w._set_list_mode("details")                                        # the default is now Album and Tracks (MusicBee)
     assert labels(w) == ["All Music"] and w.tab_bar.isVisible()
     w.search.setText("L1"); w._on_search("L1")
     assert labels(w) == ["All Music: L1"] and w.model.rowCount() == 1
@@ -49,6 +50,7 @@ def test_tabs_keep_their_own_view(win):
 
 def test_album_and_tracks_view(win):
     w = win
+    w._set_view_mode("browser"); w._set_list_mode("details")           # start from the Columns + Details arrangement
     w.tree.setCurrentItem(w._items[("remote", None)]); wait(50)
     w._set_list_mode("albums"); wait(100)
     v = w.album_view
@@ -67,7 +69,8 @@ def test_album_and_tracks_view(win):
     QTest.mouseClick(v.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(20, v.tops[1] - v.verticalScrollBar().value() + 10))
     assert len(w._selected()) == e - s
     # double-click a row plays the list from there
-    QTest.mouseDClick(v.viewport(), Qt.MouseButton.LeftButton, pos=v.row_rect(1).center()); wait(200)
+    rr = v.row_rect(1)
+    QTest.mouseDClick(v.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(rr.left() + 60, rr.center().y())); wait(200)   # on the title, not the stars
     assert w.player.current is w.model.tracks[1]
     # rating stars
     x0, sw = v._rating_x()

@@ -356,6 +356,7 @@ class GstEngine(QObject):
             return
         self._hard_stop_all()
         self._vis_q = []                       # the sink is flushed: nothing queued will be heard
+        self._vis_off = 0
         self._prepare(self.cur)
         self.cur.uri = url.toString()
         self.cur.pipe.set_property("uri", self.cur.uri)
@@ -413,6 +414,7 @@ class GstEngine(QObject):
             return
         flags = Gst.SeekFlags.FLUSH | (Gst.SeekFlags.ACCURATE if self.cfg.seek_accurate else Gst.SeekFlags.KEY_UNIT)
         self._vis_q = []                       # their timestamps belong to the old position
+        self._vis_resync = True                # ...and the analysers' stream times no longer match the clock
         if not self.cur.pipe.seek_simple(Gst.Format.TIME, flags, int(ms) * Gst.MSECOND):
             self._pending_seek = int(ms)
 
@@ -590,8 +592,23 @@ class GstEngine(QObject):
 
     # ----------------------------------------------------------------- polling
     def _reset_tracking(self):
+        self._vis_off = 0
         self._duration = 0
         self._last_pos = -1
+
+    _vis_off = 0                                               # stream time minus running time (non-zero after a seek)
+    _vis_resync = False
+
+    @staticmethod
+    def _stream_offset(cur):
+        """Stream position minus pipeline running time, now. A flushing seek restarts the running time at 0 while the
+        analysers still stamp their messages with the stream position, so after a seek every message looked
+        seconds or minutes in the future and the visualizer got nothing."""
+        clock = cur.pipe.get_clock()
+        ok, pos = cur.pipe.query_position(Gst.Format.TIME)
+        if clock is None or not ok:
+            return 0
+        return max(0, pos - (clock.get_time() - cur.pipe.get_base_time()))
 
     def _due_vis(self, cur):
         """The newest spectrum and level whose audio is being heard now.
@@ -611,10 +628,12 @@ class GstEngine(QObject):
         if clock is not None:
             now = clock.get_time() - cur.pipe.get_base_time()
         due, keep = [], []
+        off = self._vis_off
         for e in q:
             deck, end, _name, _m = e
             if deck is not cur:
                 continue                                       # from the other deck (crossfade / gapless switch)
+            end = end - off if end > off else end
             if now is None or not end or end <= now + 10 * Gst.MSECOND:
                 due.append(e)
             elif end - now < 10 * Gst.SECOND:
@@ -692,7 +711,11 @@ class GstEngine(QObject):
                     ms, self._pending_seek = self._pending_seek, None
                     flags = Gst.SeekFlags.FLUSH | (Gst.SeekFlags.ACCURATE if self.cfg.seek_accurate
                                                    else Gst.SeekFlags.KEY_UNIT)
+                    self._vis_resync = True
                     cur.pipe.seek_simple(Gst.Format.TIME, flags, ms * Gst.MSECOND)
+                elif t == Gst.MessageType.ASYNC_DONE and self._vis_resync and m.src == cur.pipe:
+                    self._vis_resync = False
+                    self._vis_off = self._stream_offset(cur)
         if title:
             self.streamTitle.emit(title)
         mags, lv = self._due_vis(cur)

@@ -86,15 +86,16 @@ class Config:
     state: str = ""                      # dock layout (QMainWindow.saveState)
     header_state: str = ""               # track table columns (order/width/visibility)
     header_columns: list = field(default_factory=list)   # the columns that state was saved with (new ones start hidden)
-    skin: str = "Dark"
-    view_mode: str = "browser"           # browser | albums
-    list_mode: str = "details"           # details | albums (the track list as Album and Tracks)
+    skin: str = "MusicBee"
+    view_mode: str = "albums"            # browser | albums
+    list_mode: str = "albums"            # details | albums (the track list as Album and Tracks)
     show_tray: bool = True
+    menu_separate: bool = False          # File / Edit / View... bar in its own small window instead of the main window
     close_to_tray: bool = False
     write_ratings: bool = False          # also store star ratings in local files' tags
     server_folders: list = field(default_factory=list)   # Subsonic music-folder ids to sync ([] = all libraries)
     server_folder_names: dict = field(default_factory=dict)   # id -> name of the server's libraries (last seen)
-    seek_style: str = "slider"           # slider | bar | waveform | wave_line
+    seek_style: str = "waveform"         # slider | bar | waveform | wave_line
     waveform_remote: bool = False        # also analyse streamed (server) tracks for the waveform: downloads the track
     vis_style: str = "bars"              # bars | mirror | line | radial | spectrogram | vu
     vis_enabled: bool = True             # put spectrum/level analysers in the audio chain (about 1% CPU)

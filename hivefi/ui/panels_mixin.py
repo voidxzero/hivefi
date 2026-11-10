@@ -5,7 +5,7 @@ import json
 from PyQt6.QtCore import QByteArray, QEvent, QPoint, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QActionGroup, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (QDockWidget, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox,
-                             QPushButton, QSizePolicy, QSlider, QStyle, QTabBar, QToolBar, QVBoxLayout, QWidget)
+                             QPushButton, QSizePolicy, QSlider, QStyle, QTabBar, QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from .. import session, waveform
 from . import icons
@@ -13,7 +13,7 @@ from .seekbar import STYLES as SEEK_STYLES, SeekBar
 from .visualizer import STYLES as VIS_STYLES, VisualizerPanel
 
 BUILTIN_LAYOUTS = ("Default", "Minimal", "Now Playing focus", "Everything")
-STATE_VERSION = 3          # bump when docks are added/removed: an older saved arrangement is then ignored
+STATE_VERSION = 4          # bump when docks are added/removed: an older saved arrangement is then ignored
 
 
 def _b64(ba: QByteArray) -> str:
@@ -26,12 +26,12 @@ def _unb64(s: str) -> QByteArray:
 
 class PanelsMixin:
     # ------------------------------------------------------------------ toolbars
-    def _make_toolbar(self, title, name):
+    def _make_toolbar(self, title, name, area=Qt.ToolBarArea.TopToolBarArea):
         tb = QToolBar(title, self)
         tb.setObjectName(name); tb.setIconSize(QSize(24, 24))
         tb.setMovable(self.edit_mode)
         tb.setAllowedAreas(Qt.ToolBarArea.AllToolBarAreas)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, tb)
+        self.addToolBar(area, tb)
         self.toolbars.append(tb)
         return tb
 
@@ -39,7 +39,7 @@ class PanelsMixin:
         S = QStyle.StandardPixmap
         self.toolbars: list[QToolBar] = []
         # --- controls
-        tb = self._make_toolbar("Controls", "tb_controls")
+        tb = self._make_toolbar("Controls", "tb_controls", Qt.ToolBarArea.BottomToolBarArea)
         self.act_prev = tb.addAction(self._icon(S.SP_MediaSkipBackward), "Previous", self.player.previous)
         self.act_play = tb.addAction(self._icon(S.SP_MediaPlay), "Play/Pause", self.player.toggle)
         self.act_stop = tb.addAction(self._icon(S.SP_MediaStop), "Stop", self.player.stop)
@@ -55,7 +55,7 @@ class PanelsMixin:
         self._update_repeat_label()
         tb.addWidget(self.btn_shuffle); tb.addWidget(self.btn_repeat)
         # --- volume
-        tv = self._make_toolbar("Volume", "tb_volume")
+        tv = self._make_toolbar("Volume", "tb_volume", Qt.ToolBarArea.BottomToolBarArea)
         vol_icon = self.vol_icon = QLabel(); vol_icon.setToolTip("Mute / unmute")
         vol_icon.setCursor(Qt.CursorShape.PointingHandCursor)
         vol_icon.mousePressEvent = lambda e: e.button() == Qt.MouseButton.LeftButton and self._toggle_mute()
@@ -67,7 +67,7 @@ class PanelsMixin:
         tv.addWidget(vol_icon); tv.addWidget(self.vol)
         # --- search
         ts = self._make_toolbar("Search", "tb_search")
-        self.search = QLineEdit(); self.search.setPlaceholderText("Search…"); self.search.setClearButtonEnabled(True)
+        self.search = QLineEdit(); self.search.setPlaceholderText("search"); self.search.setClearButtonEnabled(True)
         self.search.setMinimumWidth(160); self.search.setMaximumWidth(320)
         self.search.textChanged.connect(lambda _t: self._search_timer.start())
         self._search_timer = QTimer(self, singleShot=True, interval=180,
@@ -84,14 +84,19 @@ class PanelsMixin:
         self.act_list_toggle = tm.addAction("Album and Tracks"); self.act_list_toggle.setCheckable(True)
         self.act_list_toggle.setToolTip("Show the track list grouped by album, with the cover")
         self.act_list_toggle.triggered.connect(lambda on: self._set_list_mode("albums" if on else "details"))
-        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
         # --- seek bar (second row so it can stretch across the window)
-        tk = self._make_toolbar("Seek Bar", "tb_seek")
-        self.lbl_pos = QLabel("0:00"); self.lbl_pos.setMinimumWidth(44)
+        tk = self._make_toolbar("Seek Bar", "tb_seek", Qt.ToolBarArea.BottomToolBarArea)
+        self.lbl_pos = QLabel("0:00"); self.lbl_pos.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.seek = SeekBar(self.cfg.seek_style)
         self.seek.sliderMoved.connect(self.player.seek)
-        self.lbl_dur = QLabel("0:00"); self.lbl_dur.setMinimumWidth(44)
-        for w in (self.lbl_pos, self.seek, self.lbl_dur):
+        self.lbl_dur = QLabel("0:00")
+        self.lbl_sep = QLabel("/")
+        self.btn_heart = QToolButton(); self.btn_heart.setObjectName("btn_heart"); self.btn_heart.setText("♡")
+        self.btn_heart.setToolTip("Love / star the playing track"); self.btn_heart.setAutoRaise(True)
+        self.btn_heart.clicked.connect(self._heart_clicked)
+        self.act_stop.setVisible(False)                          # MusicBee has no Stop button (Playback → Stop remains)
+        # MusicBee's player bar: [prev play next] [volume] [waveform ........ ] [3:12 / 4:27] [♡]
+        for w in (self.seek, self.lbl_pos, self.lbl_sep, self.lbl_dur, self.btn_heart):
             tk.addWidget(w)
         self._wave_token = 0
 
@@ -414,9 +419,9 @@ class PanelsMixin:
 
     def _apply_builtin_layout(self, name):
         self.restoreState(self._default_state, STATE_VERSION)
-        docks = (self.dock_sources, self.dock_browser, self.dock_tracks, self.dock_np, self.dock_next,
+        docks = (self.dock_artists, self.dock_sources, self.dock_browser, self.dock_tracks, self.dock_np, self.dock_next,
                  self.dock_lyrics, self.dock_info, self.dock_eq, self.dock_vis)
-        show = {"Default": (self.dock_sources, self.dock_browser, self.dock_tracks, self.dock_np),
+        show = {"Default": (self.dock_artists, self.dock_sources, self.dock_browser, self.dock_tracks),
                 "Minimal": (self.dock_tracks,),
                 "Now Playing focus": (self.dock_np, self.dock_lyrics, self.dock_vis),
                 "Everything": docks}[name]

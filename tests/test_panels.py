@@ -137,6 +137,23 @@ def test_parse_gst_messages():
 
 
 @need_ffmpeg
+def test_visualizer_keeps_working_after_a_seek(tmp_path):
+    if not audio.GST_OK:
+        pytest.skip("GStreamer needed")
+    f = tmp_path / "t.flac"
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "sine=f=1000:d=30", str(f)], check=True)
+    cfg = Config(); cfg.vis_active = True
+    from PyQt6.QtCore import QUrl
+    be = audio.Backend(cfg); got = []
+    be.visData.connect(lambda m, l: got.append((m, l)))
+    be.setSource(QUrl.fromLocalFile(str(f))); be.play(); wait(1000)
+    for target in (15000, 5000):                       # the analysers stamp stream time, the clock restarts at 0
+        got.clear(); be.setPosition(target); wait(1500)
+        assert sum(1 for m, _l in got if m) > 10, target
+    be.stop(); be.shutdown()
+
+
+@need_ffmpeg
 def test_engine_delivers_spectrum(tmp_path):
     if not audio.GST_OK:
         pytest.skip("GStreamer needed")
@@ -290,7 +307,7 @@ def test_panels_resize_whether_or_not_edit_mode_is_on(win):
     from PyQt6.QtTest import QTest
     from PyQt6.QtWidgets import QDockWidget
     w = win
-    w.show(); w.resize(1200, 700); w.dock_sources.show(); wait(300)
+    w.show(); w.resize(1200, 700); w.dock_sources.show(); w.dock_sources.raise_(); wait(300)
     for edit in (False, True, False):
         w._set_edit_mode(edit); wait(100)
         assert w.edit_mode == edit
@@ -346,23 +363,26 @@ def test_album_art_has_a_border():
 def test_track_list_is_a_panel_like_any_other(win, tmp_path):
     w = win
     w.show(); w.resize(1200, 700); wait(300)
-    assert w.table.parent() is w.dock_tracks and w.dock_tracks.isVisible() and w.dock_tracks.windowTitle() == "Track List"
-    assert w.dockWidgetArea(w.dock_tracks) == Qt.DockWidgetArea.TopDockWidgetArea
+    assert w.list_stack.parent() is w.dock_tracks and w.table.parent() is w.list_stack            # Details | Album and Tracks
+    assert w.dock_tracks.isVisible() and w.dock_tracks.windowTitle() == "Track List"
+    assert w.dockWidgetArea(w.dock_tracks) == Qt.DockWidgetArea.RightDockWidgetArea       # MusicBee: Album and Tracks on the right
     assert w.dock_tracks.toggleViewAction().isChecked()
-    # default proportions: a compact browser above a big track list, side panels slim, nothing wider than the window
+    # default proportions: the albums in the middle get the room, side panels slim, nothing wider than the window
     wait(1500)
-    assert w.dock_browser.height() < w.dock_tracks.height() and w.dock_sources.width() < 400
+    assert w.dock_browser.width() > w.dock_tracks.width() and w.dock_sources.width() < 400
     assert w.dock_tracks.geometry().right() <= w.width() and w.width() == 1200
     # locked by default: no title bar, cannot be dragged around
     assert w.dock_tracks.titleBarWidget() is not None
     from PyQt6.QtWidgets import QDockWidget
     assert w.dock_tracks.features() == QDockWidget.DockWidgetFeature.NoDockWidgetFeatures
     w._set_edit_mode(True)
-    # move it to the right-hand area, float it, tab it with another panel, hide and show it
+    # move it to the left-hand area and back, float it, tab it with another panel, hide and show it
+    w.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, w.dock_tracks); wait(100)
+    assert w.dockWidgetArea(w.dock_tracks) == Qt.DockWidgetArea.LeftDockWidgetArea and w.model.rowCount() > 0
     w.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, w.dock_tracks); wait(100)
-    assert w.dockWidgetArea(w.dock_tracks) == Qt.DockWidgetArea.RightDockWidgetArea and w.model.rowCount() > 0
+    assert w.dockWidgetArea(w.dock_tracks) == Qt.DockWidgetArea.RightDockWidgetArea
     w.dock_tracks.setFloating(True); wait(100)
-    assert w.dock_tracks.isFloating() and w.table.isVisible() and w.table.model() is w.model
+    assert w.dock_tracks.isFloating() and w.list_stack.isVisible() and w.table.model() is w.model
     w.dock_tracks.setFloating(False); w.dock_lyrics.show(); w.tabifyDockWidget(w.dock_lyrics, w.dock_tracks); wait(100)
     assert w.dock_tracks in w.tabifiedDockWidgets(w.dock_lyrics)
     w.dock_tracks.toggleViewAction().trigger(); wait(100)
@@ -370,30 +390,30 @@ def test_track_list_is_a_panel_like_any_other(win, tmp_path):
     w.dock_tracks.toggleViewAction().trigger(); wait(100)
     assert w.dock_tracks.toggleViewAction().isChecked()
     # the arrangement survives a restart, together with the rest
-    w.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, w.dock_tracks); wait(100)
+    w.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, w.dock_tracks); wait(100)
     w._save_session()
     from hivefi.ui.main_window import MainWindow
     cfg2 = Config.load(w.cfg._path)
     w.player.stop(); w.player.mp.shutdown()
     w2 = MainWindow(cfg2, Database(tmp_path / "l.db")); w2.show(); ready(w2)
     try:
-        assert w2.dockWidgetArea(w2.dock_tracks) == Qt.DockWidgetArea.LeftDockWidgetArea and w2.dock_tracks.isVisible()
+        assert w2.dockWidgetArea(w2.dock_tracks) == Qt.DockWidgetArea.BottomDockWidgetArea and w2.dock_tracks.isVisible()
         assert w2.model.rowCount() > 0 and not w2.edit_mode
-        w2._apply_builtin_layout("Default"); wait(300)                    # layouts put it back in the middle
-        assert w2.dockWidgetArea(w2.dock_tracks) == Qt.DockWidgetArea.TopDockWidgetArea
+        w2._apply_builtin_layout("Default"); wait(300)                    # layouts put it back on the right
+        assert w2.dockWidgetArea(w2.dock_tracks) == Qt.DockWidgetArea.RightDockWidgetArea
         w2._apply_builtin_layout("Minimal"); wait(100)
         assert w2.dock_tracks.isVisible() and not w2.dock_browser.isVisible()
     finally:
         w2.player.stop(); w2.player.mp.shutdown()
 
 
-def test_track_list_panel_keeps_proportions_when_the_window_grows(win):
+def test_albums_panel_keeps_the_extra_width_when_the_window_grows(win):
     w = win
     w.show(); w.resize(1000, 600); wait(1800)
-    b, t = w.dock_browser.height(), w.dock_tracks.height()
+    b, t = w.dock_browser.width(), w.dock_tracks.width()
     w.resize(1400, 900); wait(400)
-    b2, t2 = w.dock_browser.height(), w.dock_tracks.height()
-    assert t2 - t > (b2 - b) * 1.5 and t2 > b2 * 1.8                      # the list gets most of the extra height
+    b2, t2 = w.dock_browser.width(), w.dock_tracks.width()
+    assert b2 - b > (t2 - t) * 1.5 and b2 > t2                            # the albums get most of the extra width
 
 
 def test_visualizer_colors():
@@ -456,13 +476,13 @@ def test_edit_bar_revert_and_dock_menu(win, monkeypatch):
     assert {"Panels ▾", "Save layout…", "Reset", "Revert", "Done"} <= texts
     # edit things: move a toolbar, hide a panel, pop out the track list
     area0 = w.toolBarArea(next(t for t in w.toolbars if t.objectName() == "tb_seek"))
-    w.addToolBar(Qt.ToolBarArea.BottomToolBarArea, next(t for t in w.toolbars if t.objectName() == "tb_seek"))
-    w.dock_sources.hide(); w.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, w.dock_tracks); wait(100)
+    w.addToolBar(Qt.ToolBarArea.TopToolBarArea, next(t for t in w.toolbars if t.objectName() == "tb_seek"))
+    w.dock_sources.hide(); w.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, w.dock_tracks); wait(100)
     assert not w.dock_sources.isVisible()
     w._set_edit_mode(True)                                                           # already on: must NOT re-snapshot
     w._revert_layout(); wait(200)
     assert w.toolBarArea(next(t for t in w.toolbars if t.objectName() == "tb_seek")) == area0
-    assert w.dock_sources.isVisible() and w.dockWidgetArea(w.dock_tracks) == Qt.DockWidgetArea.TopDockWidgetArea
+    assert w.dock_sources.isVisible() and w.dockWidgetArea(w.dock_tracks) == Qt.DockWidgetArea.RightDockWidgetArea
     assert w.edit_mode                                                               # reverting does not leave edit mode
     # the Panels menu lists every panel and toolbar
     pm = w.edit_bar.findChildren(QMenu)[0]; pm.aboutToShow.emit()
@@ -510,7 +530,7 @@ def test_panel_editor_in_preferences(win):
         return tab.table.cellWidget(row[name], col)
     # defaults mirror the window
     assert cell("Sources", 1).findChild(QCheckBox).isChecked() and cell("Sources", 2).currentText() == "Left"
-    assert cell("Track List", 2).currentText() == "Top" and not cell("Equalizer", 1).findChild(QCheckBox).isChecked()
+    assert cell("Track List", 2).currentText() == "Right" and not cell("Equalizer", 1).findChild(QCheckBox).isChecked()
     # change a few things: hide Sources, move Lyrics to the left and show it, stack Track Info with Lyrics,
     # float the visualizer, move the seek bar to the bottom
     cell("Sources", 1).findChild(QCheckBox).setChecked(False)

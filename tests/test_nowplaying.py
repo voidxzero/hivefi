@@ -156,6 +156,7 @@ def test_server_audio_properties_and_columns(tmp_path):
 
 def test_clicking_navigates_the_library(win):
     w, db = win, win.db
+    w._set_view_mode("browser")                                         # the Genre / Artist / Album columns
     loc = db.all_tracks("local")
     assert len(loc) == 2
     # two local albums? the fixture has one album "LA" by "Local" and the server has albums of its own

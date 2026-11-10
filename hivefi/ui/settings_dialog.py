@@ -259,6 +259,9 @@ class SettingsDialog(QDialog):
 
         gen = QWidget(); gl = QVBoxLayout(gen)
         self.tray = QCheckBox("Show system tray icon"); self.tray.setChecked(cfg.show_tray)
+        self.menu_sep = QCheckBox("Show the menu bar (File, Edit, View…) in its own window instead of in the main window")
+        self.menu_sep.setChecked(cfg.menu_separate)
+        gl.addWidget(self.menu_sep)
         self.close_tray = QCheckBox("Keep playing in the tray when the window is closed")
         self.close_tray.setChecked(cfg.close_to_tray)
         self.write_rt = QCheckBox("Write star ratings into local files' tags"); self.write_rt.setChecked(cfg.write_ratings)
@@ -449,6 +452,7 @@ class SettingsDialog(QDialog):
         c.sync_interval_min, c.sync_on_start = self.interval.value(), self.on_start.isChecked()
         c.scrobble, c.max_bitrate = self.scrobble.isChecked(), self.bitrate.currentData()
         c.show_tray, c.close_to_tray = self.tray.isChecked(), self.close_tray.isChecked()
+        c.menu_separate = self.menu_sep.isChecked()
         c.server_folders, names = self.chosen_server_folders()
         if names:
             c.server_folder_names = names

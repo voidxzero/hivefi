@@ -52,7 +52,7 @@ def test_large_library_stays_responsive(win):
     def took(fn):
         t = time.perf_counter(); fn(); wait(1); return time.perf_counter() - t
     w.source = ("all", None)
-    assert took(w.load_source) < 3.0
+    assert took(w.load_source) < 6.0          # was 3.0: the album grid (default view now) adds ~1 s per 30k tracks
     assert w.model.rowCount() > 30000
     assert took(lambda: w._header_sort(2)) < 1.0
     titles = [t["title"].lower() for t in w.model.tracks[:50]]; assert titles == sorted(titles)

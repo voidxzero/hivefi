@@ -1,7 +1,8 @@
 """Cover-art grid of albums with lazy, threaded cover loading."""
-from PyQt6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
-from PyQt6.QtWidgets import QAbstractItemView, QListView, QListWidget, QListWidgetItem, QToolTip
+from PyQt6.QtCore import QEvent, QObject, QRect, QRunnable, QSize, Qt, QThreadPool, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtWidgets import (QAbstractItemView, QListView, QListWidget, QListWidgetItem, QStyledItemDelegate,
+                             QToolTip)
 
 from .. import art
 from ..albums import title_of
@@ -31,12 +32,44 @@ class _Job(QRunnable):
         self.sigs.loaded.emit(self.gen, self.key, data)
 
 
-def _placeholder(color: QColor, frame: QColor):
-    inner = ICON - 2 * BORDER
+def _placeholder(color: QColor, frame: QColor, bordered=True):
+    inner = ICON - 2 * BORDER if bordered else ICON
     pm = QPixmap(inner, inner); pm.fill(color)
     p = QPainter(pm); p.setPen(QColor(255, 255, 255, 70)); f = p.font(); f.setPointSize(40); p.setFont(f)
     p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, "♪"); p.end()
-    return QIcon(with_border(pm, frame))
+    return QIcon(with_border(pm, frame) if bordered else pm)
+
+
+class _FlatDelegate(QStyledItemDelegate):
+    """MusicBee's tiles: a bare cover, the album in bold under it and the artist dimmed; the selected cover gets
+    a frame in the accent colour."""
+
+    def paint(self, p, option, index):
+        p.save(); p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        r = option.rect
+        cover = QRect(r.x() + (r.width() - ICON) // 2, r.y() + 6, ICON, ICON)
+        icon = index.data(Qt.ItemDataRole.DecorationRole)
+        if isinstance(icon, QIcon) and not icon.isNull():
+            pm = icon.pixmap(ICON * 2, ICON * 2)
+            sz = pm.size().scaled(ICON, ICON, Qt.AspectRatioMode.KeepAspectRatio)
+            p.drawPixmap(QRect(cover.x() + (ICON - sz.width()) // 2, cover.bottom() + 1 - sz.height(),
+                               sz.width(), sz.height()), pm)
+        if option.state & option.state.State_Selected:
+            p.setPen(QPen(option.palette.link().color(), 3)); p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(cover.adjusted(1, 1, -1, -1))
+        elif option.state & option.state.State_MouseOver:
+            p.setPen(QPen(QColor(255, 255, 255, 70), 1)); p.drawRect(cover.adjusted(0, 0, -1, -1))
+        title, _, artist = (index.data(Qt.ItemDataRole.DisplayRole) or "").partition("\n")
+        bold = QFont(option.font); bold.setBold(True); p.setFont(bold)
+        p.setPen(option.palette.text().color())
+        fm = p.fontMetrics()
+        p.drawText(QRect(cover.x(), cover.bottom() + 6, ICON, 18), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   fm.elidedText(title, Qt.TextElideMode.ElideRight, ICON))
+        small = QFont(option.font); p.setFont(small)
+        dim = QColor(option.palette.text().color()); dim.setAlpha(105); p.setPen(dim)
+        p.drawText(QRect(cover.x(), cover.bottom() + 24, ICON, 18), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   p.fontMetrics().elidedText(artist, Qt.TextElideMode.ElideRight, ICON))
+        p.restore()
 
 
 class AlbumGrid(QListWidget):
@@ -68,10 +101,19 @@ class AlbumGrid(QListWidget):
         self.sigs = _Signals(); self.sigs.loaded.connect(self._on_loaded)
         self._timer = QTimer(self, singleShot=True, interval=80, timeout=self._request_visible)
         self.verticalScrollBar().valueChanged.connect(lambda _v: self._timer.start())
+        self.flat = False
         self.placeholder = _placeholder(QColor(60, 60, 66), border_color(self))
 
+    def set_flat(self, on: bool):
+        """MusicBee style: bare covers (no frame), bold album / dim artist text, accent frame on the selection."""
+        self.flat = on
+        self.setItemDelegate(_FlatDelegate(self) if on else QStyledItemDelegate(self))
+        self.setGridSize(QSize(ICON + 24, ICON + 50) if on else QSize(ICON + 30, ICON + 52))
+        self.setSpacing(0)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+
     def set_placeholder_color(self, c: QColor):
-        self.placeholder = _placeholder(c, border_color(self))
+        self.placeholder = _placeholder(c, border_color(self), not self.flat)
 
     def set_tracks(self, tracks):
         self._gen += 1; self._current[0] = self._gen; self._requested.clear()
@@ -159,8 +201,8 @@ class AlbumGrid(QListWidget):
         pm = QPixmap()
         if not pm.loadFromData(data):
             return
-        pm = pm.scaled(ICON - 2 * BORDER, ICON - 2 * BORDER, Qt.AspectRatioMode.KeepAspectRatio,
-                       Qt.TransformationMode.SmoothTransformation)
+        edge = ICON if self.flat else ICON - 2 * BORDER
+        pm = pm.scaled(edge, edge, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         it = self._items.get(key)
         if it is not None:
-            it.setIcon(QIcon(with_border(pm, border_color(self))))
+            it.setIcon(QIcon(pm if self.flat else with_border(pm, border_color(self))))

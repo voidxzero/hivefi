@@ -9,9 +9,9 @@ from PyQt6.QtCore import QByteArray, QEventLoop, QSize, Qt, QThread, QTimer, QUr
 from PyQt6.QtGui import (QAction, QActionGroup, QColor, QCursor, QDesktopServices, QIcon, QKeySequence, QPixmap,
                          QShortcut)
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QDockWidget, QFileDialog, QInputDialog, QLabel,
-                             QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox, QPushButton, QSlider,
+                             QLineEdit, QListWidget, QMainWindow, QMenu, QMenuBar, QMessageBox, QPushButton, QSlider,
                              QSplitter, QStackedWidget, QStyle, QSystemTrayIcon, QTableView, QToolBar,
-                             QSizePolicy, QTreeWidget, QTreeWidgetItem, QWidget)
+                             QSizePolicy, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import art, scanner, sync
 from . import icons
@@ -21,6 +21,7 @@ from ..mpris import Mpris
 from ..player import Player
 from ..subsonic import Subsonic, SubsonicError
 from .. import art, convert, coverart, devicesync, inbox as inbox_mod, lastfm, notify, podcasts, sortkey, folders, stats as libstats, libexport, listenbrainz, lyrics, radio, tagtools, organizer, rgscan, skins, smart, tagedit, updater
+from .artist_list import ArtistList
 from .album_grid import AlbumGrid
 from .album_tracks import AlbumTracksView
 from .dialogs import TagDialog
@@ -94,6 +95,23 @@ class SourceTree(QTreeWidget):
             e.acceptProposedAction()
 
 
+class MenuWindow(QWidget):
+    """The menu bar in a small window of its own (Settings → General → menu bar)."""
+    closed = pyqtSignal()
+
+    def __init__(self, actions):
+        super().__init__(None, Qt.WindowType.Window)
+        self.setWindowTitle("Hivefi menu")
+        lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0)
+        self.bar = QMenuBar(); lay.addWidget(self.bar)
+        for a in actions:
+            self.bar.addAction(a)                                # the same actions (and menus) as the main window's bar
+        self.setMinimumWidth(self.bar.sizeHint().width() + 8)
+
+    def closeEvent(self, e):
+        self.closed.emit(); super().closeEvent(e)
+
+
 class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
     def __init__(self, cfg: Config, db: Database):
         super().__init__()
@@ -143,6 +161,7 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         self._set_view_mode(cfg.view_mode, initial=True)
         self._set_list_mode(cfg.list_mode, sort=False)
         self._apply_skin_visuals()
+        self._apply_menu_mode()
         self.sleep_timer = QTimer(self, singleShot=True, timeout=self._sleep_fire)
         self._setup_watch()
 
@@ -164,8 +183,8 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         """First-run proportions (needs a laid-out window): a compact browser above the track list, and the two
         side panels sharing the left column. Pairs of docks must be resized together for Qt to honour it."""
         O = Qt.Orientation
-        self.resizeDocks([self.dock_browser, self.dock_tracks], [190, 520], O.Vertical)
-        self.resizeDocks([self.dock_sources, self.dock_np], [330, 300], O.Vertical)
+        self.resizeDocks([self.dock_artists, self.dock_browser, self.dock_tracks],
+                         [260, max(300, self.width() - 260 - 400), 400], O.Horizontal)
 
     # ------------------------------------------------------------ setup
     def _rebuild_api(self):
@@ -223,8 +242,15 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
 
     def _build_ui(self):
         self._build_toolbars()
-        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
         self._build_tabs()
+        by = {tb.objectName(): tb for tb in self.toolbars}
+        tabs_tb = by["tb_tabs"]
+        for tb in (tabs_tb, by["tb_mode"], by["tb_search"]):      # one row, as in MusicBee: tabs ... view mode, search
+            self.removeToolBar(tb); self.addToolBar(Qt.ToolBarArea.TopToolBarArea, tb); tb.show()
+        spacer = QWidget(); spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        by["tb_search"].insertWidget(by["tb_search"].actions()[0], spacer)       # the last toolbar fills the row
+        for area in (Qt.DockWidgetArea.LeftDockWidgetArea, Qt.DockWidgetArea.RightDockWidgetArea):
+            self.setTabPosition(area, QTabWidget.TabPosition.North)
 
         # sources tree
         self.tree = SourceTree(); self.tree.setHeaderHidden(True)
@@ -301,17 +327,21 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         self.setCorner(Qt.Corner.BottomLeftCorner, Qt.DockWidgetArea.LeftDockWidgetArea)
         self.setCorner(Qt.Corner.TopRightCorner, Qt.DockWidgetArea.RightDockWidgetArea)
         self.setCorner(Qt.Corner.BottomRightCorner, Qt.DockWidgetArea.RightDockWidgetArea)
+        # MusicBee's arrangement: Album Artist | Albums | Album and Tracks. The Sources tree is a tab behind Album Artist.
+        self.artist_list = ArtistList(lambda: self.api)
+        self.artist_list.artistSelected.connect(self._on_artist_pick)
         self.dock_browser = self._dock("Library Browser", self.top_stack, "dock_browser",
                                        Qt.DockWidgetArea.TopDockWidgetArea)
-        self.dock_tracks = self._dock("Track List", self.list_stack, "dock_tracks", Qt.DockWidgetArea.TopDockWidgetArea)
-        self.splitDockWidget(self.dock_browser, self.dock_tracks, Qt.Orientation.Vertical)
+        self.dock_tracks = self._dock("Track List", self.list_stack, "dock_tracks", Qt.DockWidgetArea.RightDockWidgetArea)
 
         # dockable panels
         self.np_panel = NowPlayingPanel(self.cfg); self.next_panel = UpNextPanel()
         self.np_panel.navigate.connect(self._np_navigate); self.np_panel.configureRequested.connect(self._configure_now_playing)
         self.lyrics_panel = LyricsPanel(); self.info_panel = TrackInfoPanel()
         L, R = Qt.DockWidgetArea.LeftDockWidgetArea, Qt.DockWidgetArea.RightDockWidgetArea
+        self.dock_artists = self._dock("Album Artist", self.artist_list, "dock_artists", L)
         self.dock_sources = self._dock("Sources", self.tree, "dock_sources", L)
+        self.tabifyDockWidget(self.dock_artists, self.dock_sources); self.dock_artists.raise_()
         self.dock_np = self._dock("Now Playing", self.np_panel, "dock_np", L)
         self.dock_next = self._dock("Up Next", self.next_panel, "dock_next", R)
         self.dock_lyrics = self._dock("Lyrics", self.lyrics_panel, "dock_lyrics", R)
@@ -323,14 +353,16 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         self.tabifyDockWidget(self.dock_info, self.dock_eq); self.tabifyDockWidget(self.dock_eq, self.dock_vis)
         for d in (self.dock_next, self.dock_lyrics, self.dock_info, self.dock_eq, self.dock_vis):
             d.hide()
-        self.dock_np.setMinimumHeight(200)
+        self.dock_np.setMinimumHeight(200); self.dock_np.hide()
+        self.dock_artists.visibilityChanged.connect(lambda v: v and self._fill_artists())
         self.dock_lyrics.visibilityChanged.connect(lambda v: v and self._refresh_lyrics())
         self.dock_next.visibilityChanged.connect(lambda v: v and self._refresh_next())
         self.dock_info.visibilityChanged.connect(lambda v: v and self._sel_changed())
         self.next_panel.jumpRequested.connect(self.player.jump)
         self.next_panel.removeRequested.connect(self.player.remove)
         self.next_panel.moveRequested.connect(self.player.move)
-        self.status_lbl = QLabel(""); self.statusBar().addWidget(self.status_lbl, 1)
+        self.now_lbl = QLabel(""); self.statusBar().addWidget(self.now_lbl, 1)         # "Artist - Title", as in MusicBee
+        self.status_lbl = QLabel(""); self.statusBar().addPermanentWidget(self.status_lbl)
         self.sync_lbl = QLabel(""); self.statusBar().addPermanentWidget(self.sync_lbl)
         self.btn_edit = QPushButton("✎ Edit layout"); self.btn_edit.setCheckable(True); self.btn_edit.setFlat(True)
         self.btn_edit.setToolTip("Unlock the layout to move, float, tab or close panels (Ctrl+Shift+E); resizing always works")
@@ -911,8 +943,19 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         self._update_status()
 
     def _update_status(self):
+        """MusicBee's status line: what is listed (albums, size, days) and how long the queue still runs."""
         rows = self.model.tracks
-        self.status_lbl.setText(f"{len(rows)} tracks · {fmt_time(sum(t['duration'] or 0 for t in rows))}")
+        secs = sum(t["duration"] or 0 for t in rows)
+        size = sum(t.get("size") or 0 for t in rows)
+        albums = len({t.get("_ak") or (t["album_artist"], t["album"]) for t in rows})
+        sz = f"{size / 1e9:.1f} GB" if size >= 1e9 else f"{size / 1e6:.1f} MB"
+        q = self.player.queue
+        left = 0.0
+        if q and self.player.index is not None and self.player.index >= 0:
+            left = sum((q[i]["duration"] or 0) for i in self.player.upcoming() if i != self.player.index) \
+                + max(0.0, ((q[self.player.index]["duration"] or 0) - self.player.mp.position() / 1000))
+        text = f"{albums} albums, {sz}, {secs / 86400:.1f} days"
+        self.status_lbl.setText(text + (f"  /  queued: -{fmt_time(left)}" if left else ""))
 
     # ------------------------------------------------------- playback UI
     def _visible_tracks(self):
@@ -951,10 +994,13 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         self._refresh_next()
         self.np_panel.set_track(t, self._np_context())
         if not t:
-            self.setWindowTitle("Hivefi"); self.mini.art.set_art(None); self.seek.set_peaks(None); return
+            self.setWindowTitle("Hivefi"); self.now_lbl.setText(""); self.mini.art.set_art(None)
+            self.seek.set_peaks(None); return
         self._refresh_lyrics()
+        self._update_heart(); self._update_status()
         self._load_waveform(t)
         self.setWindowTitle(f'{t["artist"]} – {t["title"]}')
+        self.now_lbl.setText(f'{t["artist"]} - {t["title"]}')
         self._art_token += 1
         token, tcopy, api = self._art_token, dict(t), self.api
         w = Worker(lambda _p: art.get_art(tcopy, api, 440), self)
@@ -971,6 +1017,20 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
     def _on_pos(self, ms):
         if not self.seek.isSliderDown(): self.seek.setValue(ms)
         self.lbl_pos.setText(fmt_time(ms / 1000))
+
+    def _heart_clicked(self):
+        t = self.player.current
+        if not t or t.get("source") not in ("local", "remote"):
+            self.btn_heart.setText("♡"); return
+        on = not t.get("starred")
+        self.set_star([t], on); t["starred"] = int(on)
+        self._update_heart()
+
+    def _update_heart(self):
+        t = self.player.current
+        on = bool(t and t.get("starred"))
+        self.btn_heart.setText("♥" if on else "♡")
+        self.btn_heart.setStyleSheet("color: #e0202a;" if on else "")
 
     def _on_dur(self, ms):
         self.seek.setRange(0, ms); self.lbl_dur.setText(fmt_time(ms / 1000))
@@ -1801,7 +1861,7 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
             self.next_panel.refresh(self.player.queue, self.player.index, self.player.upcoming())
 
     def _on_queue_changed(self):
-        self._refresh_next()
+        self._refresh_next(); self._update_status()
         if self.source[0] == "queue":
             sb = self.table.verticalScrollBar(); y = sb.value()
             self.load_source(keep=True); sb.setValue(y)
@@ -1817,7 +1877,8 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         (self.act_albums if mode == "albums" else self.act_browser).setChecked(True)
         self.top_stack.setCurrentIndex(1 if mode == "albums" else 0)
         if not initial and self.dock_browser.isVisible() and self.dock_tracks.isVisible() \
-                and not self.dock_browser.isFloating() and not self.dock_tracks.isFloating():
+                and not self.dock_browser.isFloating() and not self.dock_tracks.isFloating() \
+                and self.dockWidgetArea(self.dock_browser) == self.dockWidgetArea(self.dock_tracks):
             total = (self.dock_browser.height() + self.dock_tracks.height()) or 780
             top = int(total * (0.5 if mode == "albums" else 0.25))
             self.resizeDocks([self.dock_browser, self.dock_tracks], [top, total - top], Qt.Orientation.Vertical)
@@ -1827,13 +1888,29 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         else:
             self._refresh_grid()
 
-    def _refresh_grid(self):
+    def _refresh_grid(self, artists=True):
+        if artists:
+            self._fill_artists()
         if self.cfg.view_mode != "albums": return
-        self.grid.set_tracks(self.model.base())
+        self.grid.set_tracks(self.model.narrowed("album"))
+
+    def _fill_artists(self):
+        if self.dock_artists.isVisible():
+            self.artist_list.set_tracks(self.model.narrowed("artist"), self.model.artist)
+
+    def _on_artist_pick(self, name):
+        """An artist was picked in the Album Artist panel (None = All Artists)."""
+        if self.cfg.view_mode == "albums":
+            self.model.set_filters(artist=name, album=None, ids=None)
+            self._refresh_grid(artists=False); self._update_status()
+        else:                                                    # Columns: drive the Artist column of the browser
+            lw = self.lists["artist"]
+            items = lw.findItems(name, Qt.MatchFlag.MatchExactly) if name else []
+            lw.setCurrentItem(items[0]) if items else lw.setCurrentRow(0)
 
     def _on_grid_album(self, tracks):
-        """An album was picked in the grid: show exactly its tracks (None = back to all)."""
-        self.model.set_filters(genre=None, artist=None, album=None, ids={t["id"] for t in tracks} if tracks else None)
+        """An album was picked in the grid: show exactly its tracks (None = back to all of the artist's)."""
+        self.model.set_filters(album=None, ids={t["id"] for t in tracks} if tracks else None)
         self._update_status()
 
     def _grid_menu(self, tracks, gpos):
@@ -1873,9 +1950,11 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
 
     def _build_skin_menu(self):
         self.skin_menu.clear(); grp = QActionGroup(self)
-        for name in skins.all_skins():
-            a = self.skin_menu.addAction(name); a.setCheckable(True); a.setChecked(name == self.cfg.skin)
-            grp.addAction(a); a.triggered.connect(lambda _c, n=name: self.set_skin(n))
+        for cat, names in skins.grouped().items():               # Flat / Neomorphic / Classic / Modern / ...
+            sub = self.skin_menu.addMenu(cat)
+            for name in names:
+                a = sub.addAction(name); a.setCheckable(True); a.setChecked(name == self.cfg.skin)
+                grp.addAction(a); a.triggered.connect(lambda _c, n=name: self.set_skin(n))
         self.skin_menu.addSeparator()
         self.skin_menu.addAction("Import Skin…", self._import_skin)
         self.skin_menu.addAction("Reload Skins", self._build_skin_menu)
@@ -1948,7 +2027,10 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         self._update_vol_icon()                                  # a QLabel: repaint in the new skin's colours
         self.model.playing_color = self.skin_tokens["accent"]
         self.model.set_playing(self.model.playing_id)
+        flat = self.skin_tokens.get("style") == "musicbee"
+        self.grid.set_flat(flat)
         self.grid.set_placeholder_color(QColor(self.skin_tokens["button"]))
+        self.btn_edit.setVisible(not flat)                       # MusicBee has no such button: it is in View → Panels
         self._refresh_grid()
 
     # ------------------------------------------------ tray / mini player / sleep
@@ -2215,11 +2297,33 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         w = Worker(lambda _p: sync.flush_ops(db, api), self)
         self._flush_worker = w; self._run(w)
 
+    def _apply_menu_mode(self):
+        """Menu bar in the main window (default) or in a separate window."""
+        mb = self.menuBar()
+        sep = self.cfg.menu_separate
+        win = getattr(self, "menu_win", None)
+        ctx = Qt.ShortcutContext.ApplicationShortcut if sep else Qt.ShortcutContext.WindowShortcut
+        for a in self.shortcut_actions.values():                 # hotkeys keep working while the menu window has focus
+            a.setShortcutContext(ctx)
+        if sep:
+            if win is None:
+                win = self.menu_win = MenuWindow(mb.actions())
+                win.closed.connect(self._menu_window_closed)
+            mb.setVisible(False); win.show()
+        else:
+            if win is not None:
+                win.hide()
+            mb.setVisible(True)
+
+    def _menu_window_closed(self):
+        if not self._closing and not self._quitting:             # closing it puts the bar back in the main window
+            self.cfg.menu_separate = False; self.cfg.save(); self._apply_menu_mode()
+
     def open_settings(self):
         dlg = SettingsDialog(self.cfg, self)
         if dlg.exec():
             dlg.apply(); self._rebuild_api(); self._apply_sync_timer()
-            self.player.configure(); self._update_vis_availability(); self._setup_watch()
+            self.player.configure(); self._update_vis_availability(); self._setup_watch(); self._apply_menu_mode()
             sortkey.set_articles(self.cfg.ignore_articles); self.load_source(keep=True)
             self._after_library_change()
             self.scan_library(quiet=True)
@@ -2227,8 +2331,11 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
 
     def closeEvent(self, e):
         if self.cfg.close_to_tray and self.tray and self.tray.isVisible() and not self._quitting:
-            self.hide(); e.ignore(); return
+            self.hide(); e.ignore()
+            if getattr(self, "menu_win", None): self.menu_win.hide()
+            return
         self._closing = True                                     # lets a running scan stop early
+        if getattr(self, "menu_win", None): self.menu_win.close()
         self._save_session()
         if self.tray: self.tray.hide()
         self.mini.hide()

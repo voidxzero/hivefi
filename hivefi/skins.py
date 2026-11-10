@@ -13,6 +13,23 @@ from .skinpack import SPINDLE_SKINS
 BUILTIN = {
     "Dark": dict(window="#252529", text="#dcdcdc", base="#1c1c1f", alt="#222226", button="#303036",
                  highlight="#1e78be", hl_text="#ffffff", accent="#4fc3f7"),
+    "MusicBee": dict(window="#1b1b1b", text="#dcdcdc", base="#161616", alt="#161616", button="#262626",
+                     highlight="#2a2a2a", hl_text="#ffffff", accent="#1fa8e8", style="musicbee", dim="#6b6b6b",
+                     border="#262626", panel_top="#1b1b1b", panel_bot="#1b1b1b", r=0, r_panel=0),
+    "Neomorphic": dict(window="#e0e5ec", text="#44495a", base="#e6ebf2", alt="#dde2e9", button="#e0e5ec",
+                       highlight="#cfd8e6", hl_text="#2f3547", accent="#5b7cfa", style="neo", dim="#8d96a8",
+                       border="#c3cad6", panel_top="#e0e5ec", panel_bot="#e0e5ec", btn_top="#e0e5ec",
+                       btn_bot="#e0e5ec", hilite="#ffffff", accent_text="#ffffff", r=12, r_panel=14),
+    "Neomorphic Dark": dict(window="#2b2f36", text="#c9ced8", base="#2e323a", alt="#2a2e35", button="#2b2f36",
+                            highlight="#3a404b", hl_text="#ffffff", accent="#6c8cff", style="neo", dim="#7b8392",
+                            border="#23262c", panel_top="#2b2f36", panel_bot="#2b2f36", btn_top="#2b2f36",
+                            btn_bot="#2b2f36", hilite="#3a3f49", accent_text="#ffffff", r=12, r_panel=14),
+    "Winamp Classic": dict(window="#2b2c38", text="#00e000", base="#000000", alt="#000000", button="#3b3d4e",
+                           highlight="#0000c6", hl_text="#ffffff", accent="#00e000", style="winamp",
+                           dim="#008800", border="#12121a", panel_top="#4a4c60", panel_bot="#262733",
+                           btn_top="#52546a", btn_bot="#30313f", hilite="#6a6c84", title_top="#5a5c78",
+                           title_bot="#2a2b3a", lcd_bg="#000000", lcd_fg="#00e000", lcd_dim="#004400",
+                           accent_text="#000000", caption="#d6d6e0", r=0, r_panel=0),
     "Light": dict(window="#f0f0f2", text="#1e1e1e", base="#ffffff", alt="#f5f6f8", button="#e4e5e9",
                   highlight="#2f80d0", hl_text="#ffffff", accent="#2f80d0"),
     "Classic": dict(window="#e9edf3", text="#1b1b1b", base="#ffffff", alt="#f1f5fb", button="#d5dde9",
@@ -31,7 +48,7 @@ TOKENS = tuple(BUILTIN[DEFAULT])
 # optional richer tokens (gradients, bevels, LCD colours...). Skins that have them get a fully styled UI.
 EXTRA_COLORS = ("panel_top", "panel_bot", "border", "hilite", "dim", "accent_text", "btn_top", "btn_bot",
                 "title_top", "title_bot", "lcd_bg", "lcd_fg", "lcd_dim", "good", "warn", "bad", "caption")
-EXTRA_SETTINGS = ("r", "r_panel", "font", "font_size", "style")
+EXTRA_SETTINGS = ("r", "r_panel", "font", "font_size", "style", "category")
 
 
 def _mix(a: str, b: str, t: float = 0.5) -> str:
@@ -178,6 +195,135 @@ def _glyph(name: str, color: str) -> str:
         return ""
 
 
+def _musicbee_qss(t: dict) -> str:
+    """MusicBee's flat look: no frames, gradients or bevels; plain-text headers, thin scrollbars, upper-case tabs."""
+    w, tx, ac, dim = t["window"], t["text"], t["accent"], t["dim"]
+    return f"""
+QToolBar {{ background: {w}; border: 0; spacing: 4px; padding: 2px 6px; }}
+QToolBar QToolButton, QToolBar QPushButton {{ background: transparent; border: 0; padding: 4px 8px; color: {tx}; }}
+QToolBar QToolButton:hover, QToolBar QPushButton:hover {{ background: #2a2a2a; }}
+QToolBar QToolButton:checked, QToolBar QPushButton:checked {{ background: transparent; color: {ac}; }}
+QToolBar QToolButton:!checked:checkable {{ border: 0; padding: 4px 8px; }}
+QToolBar QLineEdit {{ background: transparent; border: 0; border-bottom: 1px solid #333; border-radius: 0;
+    padding: 3px 4px; color: {tx}; }}
+QToolBar QLineEdit:focus {{ border-bottom: 1px solid {ac}; }}
+QPushButton#btn_shuffle:checked, QPushButton#btn_repeat:checked {{ background: transparent; border: 0; }}
+QMenuBar {{ background: {w}; }}
+QMenuBar::item:selected, QMenu::item:selected {{ background: #2e2e2e; color: {tx}; }}
+QMenu {{ background: #202020; border: 1px solid #333; border-radius: 0; }}
+QListView, QTreeView, QTableView {{ background: {w}; alternate-background-color: {w}; border: 0; border-radius: 0;
+    outline: 0; }}
+QTreeView::item:selected, QListView::item:selected, QTreeView::item:hover, QListView::item:hover {{
+    background: #2a2a2a; color: {tx}; }}
+QTableView {{ selection-background-color: #2e2e2e; selection-color: #ffffff; }}
+QHeaderView::section {{ background: {w}; color: {tx}; border: 0; border-bottom: 1px solid #2a2a2a; padding: 4px 6px; }}
+QDockWidget::title {{ background: {w}; border: 0; color: {tx}; padding: 4px 6px; font-weight: bold; }}
+QSplitter::handle {{ background: {w}; }}
+QStatusBar {{ background: {w}; color: {dim}; }}
+QStatusBar::item {{ border: 0; }}
+QScrollBar:vertical {{ width: 6px; background: transparent; }}
+QScrollBar:horizontal {{ height: 6px; background: transparent; }}
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{ background: #3a3a3a; border: 0; border-radius: 0; }}
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{ background: #555; }}
+QTabBar {{ background: {w}; }}
+QTabBar::tab {{ background: transparent; border: 0; border-radius: 0; padding: 6px 12px; color: {tx};
+    text-transform: uppercase; }}
+QTabBar::tab:selected {{ background: transparent; border: 0; color: {ac}; font-weight: bold; }}
+QTabBar::tab:hover {{ color: #ffffff; }}
+QSlider::groove:horizontal {{ height: 2px; background: #444; border-radius: 0; }}
+QSlider::sub-page:horizontal {{ background: {tx}; border-radius: 0; }}
+QSlider::handle:horizontal {{ background: {tx}; width: 6px; height: 10px; margin: -5px 0; border-radius: 0; }}
+QListWidget#albumgrid {{ background: {w}; border: 0; }}
+QListWidget#albumgrid::item, QListWidget#albumgrid::item:selected, QListWidget#albumgrid::item:hover {{
+    background: transparent; }}
+"""
+
+
+# the groups of the View -> Skin menu, in order; user skins can name one with "category" (anything else: "Custom")
+CATEGORIES = {
+    "Flat": ["MusicBee", "Dark", "Light", "AMOLED", "High Contrast", "Slate Light", "Paper"],
+    "Neomorphic": ["Neomorphic", "Neomorphic Dark"],
+    "Classic": ["Winamp Classic", "Classic", "Classic 98", "Amp Classic", "Chrome Deck", "Olive Noir"],
+    "Modern": ["Modern Night", "Luna Midnight", "Aqua Deck", "Ice Blue", "Emerald Core", "Vapor Dusk", "Midnight",
+               "Sunset", "Cyberpunk", "Forest"],
+    "Colour Schemes": ["Nord", "Solarized Dark", "Solarized Light", "Dracula", "Gruvbox Dark", "Tokyo Night",
+                       "Catppuccin Mocha", "Rose Pine", "One Dark", "Monokai"],
+}
+
+
+def grouped(skin_map: dict | None = None) -> dict:
+    """{category: [skin names]} for the skin menu; skins not listed above go to the category in their file or 'Custom'."""
+    skin_map = skin_map or all_skins()
+    out = {c: [n for n in names if n in skin_map] for c, names in CATEGORIES.items()}
+    placed = {n for names in out.values() for n in names}
+    for n, t in skin_map.items():
+        if n not in placed:
+            out.setdefault(str(t.get("category") or "Custom"), []).append(n)
+    return {c: names for c, names in out.items() if names}
+
+
+def _neo_qss(t: dict) -> str:
+    """Soft UI: raised controls (light edge top-left, shadow edge bottom-right) and pressed / input fields inset."""
+    w, tx, ac = t["window"], t["text"], t["accent"]
+    hi, sh = t["hilite"], t["border"]
+    r = int(t.get("r", 12))
+    raised = (f"border: 2px solid {w}; border-top-color: {hi}; border-left-color: {hi}; "
+              f"border-right-color: {sh}; border-bottom-color: {sh}; border-radius: {r}px;")
+    inset = (f"border: 2px solid {w}; border-top-color: {sh}; border-left-color: {sh}; "
+             f"border-right-color: {hi}; border-bottom-color: {hi}; border-radius: {r}px;")
+    return f"""
+QToolBar {{ background: {w}; border: 0; spacing: 8px; padding: 4px 8px; }}
+QPushButton, QToolButton {{ background: {w}; color: {tx}; {raised} padding: 4px 12px; }}
+QToolBar QToolButton {{ background: {w}; {raised} padding: 4px 8px; }}
+QPushButton:hover, QToolButton:hover {{ color: {ac}; }}
+QPushButton:pressed, QToolButton:pressed, QPushButton:checked, QToolButton:checked, QToolBar QToolButton:checked {{
+    background: {w}; color: {ac}; {inset} }}
+QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox {{ background: {t['base']}; color: {tx}; {inset} padding: 3px 8px; }}
+QListView, QTreeView, QTableView {{ background: {t['base']}; alternate-background-color: {t['base']}; {inset} outline: 0; }}
+QTreeView::item:selected, QListView::item:selected {{ background: {t['highlight']}; color: {t['hl_text']};
+    border-radius: 8px; }}
+QTableView {{ selection-background-color: {t['highlight']}; selection-color: {t['hl_text']}; }}
+QHeaderView::section {{ background: {w}; color: {t['dim']}; border: 0; padding: 5px 8px; }}
+QDockWidget::title {{ background: {w}; border: 0; color: {t['dim']}; padding: 6px 8px; }}
+QMenuBar, QStatusBar, QTabBar {{ background: {w}; }}
+QMenu {{ background: {w}; {raised} padding: 6px; }}
+QMenu::item {{ border-radius: 8px; }}
+QMenu::item:selected {{ background: {t['highlight']}; color: {t['hl_text']}; }}
+QTabBar::tab {{ background: {w}; border: 0; padding: 6px 14px; border-radius: {r}px; color: {tx}; }}
+QTabBar::tab:selected {{ {inset} color: {ac}; font-weight: bold; }}
+QSlider::groove:horizontal {{ height: 8px; background: {w}; {inset} border-radius: 4px; }}
+QSlider::sub-page:horizontal {{ background: {ac}; border-radius: 4px; }}
+QSlider::handle:horizontal {{ background: {w}; {raised} width: 14px; height: 14px; margin: -5px 0; border-radius: 8px; }}
+QScrollBar:vertical {{ width: 10px; background: transparent; }}
+QScrollBar::handle:vertical {{ background: {sh}; border-radius: 5px; min-height: 26px; }}
+QScrollBar:horizontal {{ height: 10px; background: transparent; }}
+QScrollBar::handle:horizontal {{ background: {sh}; border-radius: 5px; min-width: 26px; }}
+QListWidget#albumgrid {{ background: {w}; border: 0; }}
+"""
+
+
+def _winamp_qss(t: dict) -> str:
+    """Winamp 2.x look: bevelled metal chrome, black lists with green text, blue selection, LCD-style time."""
+    return f"""
+QToolBar {{ border: 1px solid #000; }}
+QToolBar QToolButton, QPushButton {{ border: 1px solid #000; border-top-color: {t['hilite']}; border-left-color: {t['hilite']};
+    color: {t['caption']}; padding: 3px 8px; }}
+QToolBar QToolButton:checked, QPushButton:checked {{ background: #1f2030; border-top-color: #000; border-left-color: #000;
+    border-right-color: {t['hilite']}; border-bottom-color: {t['hilite']}; color: {t['accent']}; }}
+QTableView, QListView, QTreeView {{ background: #000000; alternate-background-color: #000000; color: #00ff00;
+    selection-background-color: #0000c6; selection-color: #ffffff; border: 2px solid #000; outline: 0; }}
+QTreeView::item:selected, QListView::item:selected {{ background: #0000c6; color: #ffffff; }}
+QHeaderView::section {{ color: {t['caption']}; }}
+QLabel {{ color: {t['caption']}; }}
+QMenuBar {{ color: {t['caption']}; }} QMenu {{ color: {t['caption']}; }}
+QSlider::groove:horizontal {{ height: 6px; background: #000; border: 1px solid {t['hilite']}; border-radius: 0; }}
+QSlider::sub-page:horizontal {{ background: #00a000; border-radius: 0; }}
+QSlider::handle:horizontal {{ background: {_grad(t['btn_top'], t['btn_bot'])}; border: 1px solid #000; width: 12px;
+    height: 10px; margin: -5px 0; border-radius: 0; }}
+QStatusBar {{ color: {t['caption']}; }}
+"""
+
+
 def build_qss(t: dict) -> str:
     base = f"""
 QDockWidget::title {{ background: {t['button']}; padding: 4px 8px; }}
@@ -304,6 +450,12 @@ QGroupBox {{ border: 1px solid {bd}; border-radius: {rp}px; margin-top: 10px; pa
 QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 0 4px; }}
 QListWidget#albumgrid::item:selected {{ background: {t['highlight']}; color: {t['hl_text']}; }}
 """
+    if t.get("style") == "musicbee":
+        out += _musicbee_qss(t)
+    elif t.get("style") == "neo":
+        out += _neo_qss(t)
+    elif t.get("style") == "winamp":
+        out += _winamp_qss(t)
     if t.get("font"):
         out += f"\nQWidget {{ font-family: {t['font']}; {'font-size: ' + t['font_size'] + ';' if t.get('font_size') else ''} }}\n"
     return out
