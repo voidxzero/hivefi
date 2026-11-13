@@ -5,7 +5,7 @@ A music manager and player for Linux (PyQt6) with two-way **Navidrome / Subsonic
 Install (Arch, Fedora, Debian/Ubuntu, others):
 ```
 ./install.sh --deps   # installs system packages (Qt6, GStreamer, PyGObject) via pacman/dnf/apt
-./install.sh          # venv (sees system packages) + desktop entry + ~/.local/bin/hivefi
+./install.sh          # desktop entry + ~/.local/bin/hivefi, runs straight from this folder
 ./run.sh              # or run straight from the source tree
 ```
 Arch packages: `python-pyqt6 python-mutagen python-requests python-gobject gst-python gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav qt6-multimedia-ffmpeg`.

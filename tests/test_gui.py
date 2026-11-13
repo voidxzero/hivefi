@@ -23,6 +23,8 @@ _APP: list = []
 
 @pytest.fixture
 def win(tmp_path, monkeypatch):
+    if not shutil.which("ffmpeg"):           # other test files use this fixture too; the module mark covers only this one
+        pytest.skip("ffmpeg needed")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     music = tmp_path / "music"; music.mkdir()
     for i in (1, 2):
