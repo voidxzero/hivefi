@@ -228,3 +228,58 @@ def test_disc_suffixes_without_brackets_meet():
     assert albums.norm_album("Hits (Golden Edition CD2)") == "hits (golden edition)"
     assert albums.norm_album("Disc 1") == "disc 1"             # nothing but a disc number: kept
     assert albums.norm_album("1999") == "1999" and albums.norm_album("CD") == "cd"
+
+
+def test_clicked_album_opens_under_its_row():
+    """Albums view: the selected album's tracks show in a band across the grid, right under that album's row;
+    the rows after it move down, another album moves the band, a click on the open album closes it."""
+    from PyQt6.QtCore import QEventLoop, QTimer, Qt
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from hivefi.ui.album_grid import AlbumGrid
+
+    def wait(ms):
+        loop = QEventLoop(); QTimer.singleShot(ms, loop.quit); loop.exec()
+    ts = []
+    for a in range(12):                                      # 12 albums of 3 tracks, A00 .. A11
+        ts += [T(a * 10 + n, album=f"A{a:02d}", artist="X", album_artist="X", track_no=n, year=1990 + a,
+                 path=f"/m/{a}/{n}.mp3") for n in (1, 2, 3)]
+    albums.annotate(ts)
+    g = AlbumGrid(lambda: None); g.resize(4 * g._cell.width() + 30, 900); g.set_tracks(ts); g.show(); wait(50)
+    tiles = [g.item(i) for i in range(12)]
+    ys = sorted({g.visualItemRect(it).y() for it in tiles})
+    assert len(ys) == 3                                      # 4 columns, 3 rows
+    got = []; g.albumSelected.connect(got.append)
+    QTest.mouseClick(g.viewport(), Qt.MouseButton.LeftButton, pos=g.visualItemRect(tiles[1]).center()); wait(50)
+    assert {t["album"] for t in got[-1]} == {"A01"} and g.count() == 13
+    band = g.panel.geometry()
+    assert g.panel.isVisible() and [t["track_no"] for t in g.panel.tracks] == [1, 2, 3]
+    assert band.width() == g.viewport().width() and band.y() == g.visualItemRect(tiles[0]).bottom() + 1
+    assert g.visualItemRect(tiles[4]).y() == band.bottom() + 1          # the second row starts below the band
+    assert g.visualItemRect(tiles[3]).y() == g.visualItemRect(tiles[1]).y()
+    played = []; g.playFrom.connect(lambda tracks, i: played.append((len(tracks), tracks[i]["track_no"])))
+    QTest.mouseDClick(g.panel, Qt.MouseButton.LeftButton, pos=g.panel._cell_rect(2).center())
+    assert played == [(3, 3)]
+    # an album of the last row: the band moves there, nothing is left behind
+    QTest.mouseClick(g.viewport(), Qt.MouseButton.LeftButton, pos=g.visualItemRect(tiles[9]).center()); wait(50)
+    assert g.count() == 13 and {t["album"] for t in g.panel.tracks} == {"A09"}
+    assert g.visualItemRect(tiles[4]).y() == g.visualItemRect(tiles[0]).bottom() + 1
+    assert g.panel.geometry().y() == g.visualItemRect(tiles[8]).bottom() + 1
+    # narrower: 3 columns now, the band follows the album's new row
+    g.resize(3 * g._cell.width() + 30, 900); wait(100)
+    assert g.count() == 13 and g.panel.geometry().width() == g.viewport().width()
+    assert g.panel.geometry().y() == g.visualItemRect(tiles[9]).bottom() + 1
+    assert g.visualItemRect(tiles[11]).y() == g.visualItemRect(tiles[9]).y()
+    # a click on the open album closes it and clears the selection
+    QTest.mouseClick(g.viewport(), Qt.MouseButton.LeftButton, pos=g.visualItemRect(tiles[9]).center()); wait(50)
+    assert g.count() == 12 and not g.panel.isVisible() and got[-1] is None
+    # switched off: selecting only selects
+    g.set_expand(False)
+    QTest.mouseClick(g.viewport(), Qt.MouseButton.LeftButton, pos=g.visualItemRect(tiles[2]).center()); wait(50)
+    assert g.count() == 12 and not g.panel.isVisible() and {t["album"] for t in got[-1]} == {"A02"}
+    g.set_expand(True); wait(50)
+    assert g.count() == 13 and g.panel.isVisible()
+    g.set_tracks(ts[:6])                                      # refilled: closed, no stale band
+    assert g.count() == 2 and not g.panel.isVisible()
+    g.pool.waitForDone(2000); g.close()

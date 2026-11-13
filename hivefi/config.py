@@ -92,6 +92,7 @@ class Config:
     view_mode: str = "albums"            # browser | albums
     list_mode: str = "albums"            # details | albums (the track list as Album and Tracks)
     show_tray: bool = True
+    grid_expand: bool = True             # Albums view: a click opens the album's tracks under its row
     ui_scale: int = 100                  # percent; applied when the program starts (QT_SCALE_FACTOR)
     own_titlebar: bool = True            # window buttons inside the program (no system title bar)
     menu_separate: bool = False          # File / Edit / View... bar in its own small window instead of the main window

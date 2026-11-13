@@ -30,4 +30,8 @@ mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications" "$HOME/.local/shar
 ln -sf "$PWD/.venv/bin/hivefi" "$HOME/.local/bin/hivefi"
 sed "s|^Exec=.*|Exec=$PWD/.venv/bin/hivefi|" data/hivefi.desktop > "$HOME/.local/share/applications/hivefi.desktop"
 cp hivefi/hivefi.svg "$HOME/.local/share/icons/hicolor/scalable/apps/hivefi.svg"
+# a running desktop only notices a new icon when the theme folder itself changes
+touch "$HOME/.local/share/icons/hicolor"
+command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t -f --ignore-theme-index "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+command -v update-desktop-database >/dev/null && update-desktop-database -q "$HOME/.local/share/applications" 2>/dev/null || true
 echo "Installed. Launch 'Hivefi' from your app menu or run: hivefi (~/.local/bin must be on PATH)"

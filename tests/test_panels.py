@@ -659,3 +659,37 @@ def test_old_column_layout_is_handled(win):
         assert w3.cfg.header_columns == [c[1] for c in COLUMNS]
     finally:
         w3.player.stop(); w3.player.mp.shutdown()
+
+
+def test_window_buttons_stay_in_the_top_row_without_a_menu_bar(win):
+    """With the menu bar outside the window (own window, or a global menu) the window buttons sit at the end of the
+    search toolbar, i.e. of the top row - through restored layouts and Edit Mode. (As a toolbar of their own they
+    ended up unplaced in the top left corner after a layout was restored.)"""
+    from hivefi.ui.main_window import STATE_VERSION, WindowButtons
+    w = win
+    w.show(); w.resize(1300, 700); wait(300)
+    tabs = next(t for t in w.toolbars if t.objectName() == "tb_tabs")
+    btns = next(b for b in w.tb_search.findChildren(WindowButtons))
+    assert not btns.isVisible()                                 # menu bar in the window: buttons in its corner
+    old = w.saveState(STATE_VERSION)
+    w.cfg.own_titlebar = True; w.cfg.menu_separate = True
+    w._apply_menu_mode(); w._apply_titlebar(); wait(200)
+
+    def in_top_row():
+        right = btns.mapTo(w, btns.rect().topRight()).x()
+        return btns.isVisible() and w.tb_search.y() == tabs.y() and right >= w.width() - 12 \
+            and w.search.isVisible() and w.search.mapTo(w, w.search.rect().topRight()).x() < btns.mapTo(w, btns.rect().topLeft()).x()
+    assert in_top_row()
+    w.restoreState(old, STATE_VERSION); w._place_window_toolbar(); wait(200)
+    assert in_top_row()
+    for name in ("Everything", "Default"):
+        w._apply_builtin_layout(name); wait(200)
+        assert in_top_row()
+    w._set_edit_mode(True); wait(200)
+    assert in_top_row() and w.edit_toolbar.y() > tabs.y()
+    w._set_edit_mode(False); wait(200)
+    assert in_top_row()
+    w.tb_search.hide(); w._place_window_toolbar(); wait(100)
+    assert in_top_row()                                         # hiding the search toolbar must not hide them
+    w.cfg.menu_separate = False; w._apply_menu_mode(); w._apply_titlebar(); wait(200)
+    assert not btns.isVisible()

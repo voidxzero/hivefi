@@ -133,4 +133,8 @@ def icon(widget, sp) -> QIcon:
 def app_icon() -> QIcon:
     """Hivefi's own icon: a honeycomb cell with a note (hivefi/hivefi.svg)."""
     from pathlib import Path
-    return QIcon(str(Path(__file__).resolve().parent.parent / "hivefi.svg"))
+    src = QIcon(str(Path(__file__).resolve().parent.parent / "hivefi.svg"))
+    icon = QIcon()                      # ready-made sizes: an SVG-only icon reports none, and a Wayland desktop that
+    for s in (16, 22, 24, 32, 48, 64, 128, 256):      # is handed the window icon then shows an empty one
+        icon.addPixmap(src.pixmap(s, s))
+    return icon

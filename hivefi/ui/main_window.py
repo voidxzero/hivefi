@@ -349,7 +349,11 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         for tb in (tabs_tb, by["tb_mode"], by["tb_search"]):      # one row, as in MusicBee: tabs ... view mode, search
             self.removeToolBar(tb); self.addToolBar(Qt.ToolBarArea.TopToolBarArea, tb); tb.show()
         spacer = QWidget(); spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        by["tb_search"].insertWidget(by["tb_search"].actions()[0], spacer)       # the last toolbar fills the row
+        spacer.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)     # drag the window by the empty part
+        ts = self.tb_search = by["tb_search"]
+        ts.insertWidget(ts.actions()[0], spacer)                 # the last toolbar fills the row
+        self.act_window_buttons = ts.addWidget(WindowButtons(self, with_title=False))    # see _place_window_toolbar
+        self.act_window_buttons.setVisible(False)
         for area in (Qt.DockWidgetArea.LeftDockWidgetArea, Qt.DockWidgetArea.RightDockWidgetArea):
             self.setTabPosition(area, QTabWidget.TabPosition.North)
 
@@ -373,6 +377,8 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         self.grid = AlbumGrid(lambda: self.api)
         self.grid.albumSelected.connect(self._on_grid_album)
         self.grid.playRequested.connect(lambda ts: self.player.play_list(ts, 0))
+        self.grid.playFrom.connect(lambda ts, i: self.player.play_list(ts, i))
+        self.grid.expand = bool(self.cfg.grid_expand)
         self.grid.contextRequested.connect(self._grid_menu)
         self.top_stack = QStackedWidget(); self.top_stack.addWidget(browser); self.top_stack.addWidget(AlbumsPage(self.grid))
 
@@ -573,6 +579,9 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         vm.addAction("Show Visualizer", self.dock_vis.show)
         v.addAction("Columns View", lambda: self._set_view_mode("browser"))
         v.addAction("Albums View", lambda: self._set_view_mode("albums"))
+        a = v.addAction("Expand Album on Click"); a.setCheckable(True); a.setChecked(bool(self.cfg.grid_expand))
+        a.setToolTip("Albums view: show the clicked album's tracks under its row")
+        a.toggled.connect(self._set_grid_expand)
         lg = QActionGroup(self)
         self.act_list_details = v.addAction("Track List: Details"); self.act_list_albums = v.addAction("Track List: Album and Tracks")
         for a, mode in ((self.act_list_details, "details"), (self.act_list_albums, "albums")):
@@ -1096,6 +1105,7 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
 
     def _on_track(self, t):
         self.model.set_playing(t["id"] if t else None)
+        self.grid.set_playing(t["id"] if t else None)
         self._refresh_next()
         self.np_panel.set_track(t, self._np_context())
         if not t:
@@ -2020,6 +2030,10 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
             items = lw.findItems(name, Qt.MatchFlag.MatchExactly) if name else []
             lw.setCurrentItem(items[0]) if items else lw.setCurrentRow(0)
 
+    def _set_grid_expand(self, on):
+        self.cfg.grid_expand = bool(on); self.cfg.save()
+        self.grid.set_expand(on)
+
     def _on_grid_album(self, tracks):
         """An album was picked in the grid: show exactly its tracks (None = back to all of the artist's)."""
         self.model.set_filters(album=None, ids={t["id"] for t in tracks} if tracks else None)
@@ -2461,30 +2475,24 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         return not self.isVisible() or (mb.isVisible() and mb.height() > 4)
 
     def _place_window_toolbar(self):
-        """Keep the window-button toolbar at the right end of the top row (also after a layout was restored)."""
-        tb = getattr(self, "tb_window", None)
-        if tb is not None and not tb.isHidden():
-            ed = self.edit_toolbar                                 # on a row of its own below: go in front of its break
-            self.removeToolBar(tb)
-            self.insertToolBar(ed, tb); self.removeToolBarBreak(tb); self.insertToolBarBreak(ed)
-            tb.show()
+        """The window buttons for when the menu bar is not in the window (its own window, or a global menu): at
+        the end of the search toolbar, which closes the top row. They used to be a toolbar of their own, but moving
+        that into place in a restored layout left it unplaced in the window's corner, or crashed in Qt's toolbar
+        layout on Wayland."""
+        act = getattr(self, "act_window_buttons", None)
+        if act is None:
+            return
+        want = bool(self.cfg.own_titlebar) and not self._menu_in_window()
+        act.setVisible(want)
+        if want and self.tb_search.isHidden():                    # the buttons must not disappear with it
+            self.tb_search.show()
 
     def _apply_titlebar(self):
         """Frameless window with its own minimise / maximise / close: in the menu bar's corner, or at the right of
         the top toolbar row when the menu bar is not in the window."""
         own = bool(self.cfg.own_titlebar)
         in_menu = own and self._menu_in_window()
-        tb = getattr(self, "tb_window", None)
-        if own and not in_menu and tb is None:
-            tb = self.tb_window = QToolBar("Window Buttons", self); tb.setObjectName("tb_window")
-            tb.setMovable(False); tb.setFloatable(False); tb.toggleViewAction().setVisible(False)
-            tb.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
-            gap = QWidget(); gap.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            gap.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)   # clicks reach the toolbar: drag to move
-            tb.addWidget(gap); tb.addWidget(WindowButtons(self, with_title=False))
-        if tb is not None:
-            tb.setVisible(own and not in_menu)
-            self._place_window_toolbar()
+        self._place_window_toolbar()
         self._title_filter_on(own and self.isVisible())           # only while on screen, see _title_filter_on
         own = in_menu                                              # below: the menu bar's corner
         frameless = bool(self.cfg.own_titlebar)
