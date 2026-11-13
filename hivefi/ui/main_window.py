@@ -2611,6 +2611,9 @@ class MainWindow(PanelsMixin, TabsMixin, QMainWindow):
         if getattr(self, "menu_win", None): self.menu_win.close()
         self._save_session()
         if getattr(self, "_autosave", None) is not None: self._autosave.stop()
+        for name in ("sync_timer", "sleep_timer"):              # a closed window must not wake up again (the sync
+            t = getattr(self, name, None)                        # timer fires every few minutes)
+            if t is not None: t.stop()
         if self.tray: self.tray.hide()
         self.mini.hide()
         self.player.mp.shutdown()

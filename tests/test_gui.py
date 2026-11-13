@@ -45,7 +45,15 @@ def win(tmp_path, monkeypatch):
     wait(300)
     w._st = st
     yield w
-    w.close(); srv.shutdown()
+    # Close and destroy every window the test opened (some open a second one) while they are still whole. Left
+    # to the garbage collector, a window was half cleared - attributes gone, Qt side alive - and its timers then
+    # ran on it and aborted the run, minutes later, in some other test.
+    from PyQt6 import sip
+    for x in QApplication.topLevelWidgets():
+        if isinstance(x, MainWindow) and not sip.isdeleted(x):
+            x._quitting = True; x.close(); x.deleteLater()
+    wait(50)
+    srv.shutdown()
 
 
 def test_everything(win):

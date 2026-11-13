@@ -693,3 +693,12 @@ def test_window_buttons_stay_in_the_top_row_without_a_menu_bar(win):
     assert in_top_row()                                         # hiding the search toolbar must not hide them
     w.cfg.menu_separate = False; w._apply_menu_mode(); w._apply_titlebar(); wait(200)
     assert not btns.isVisible()
+
+
+def test_a_closed_window_does_not_wake_up_again(win):
+    """Closing for good stops the window's own timers: the periodic Navidrome sync fired on closed windows later
+    (in the test run, on half-destroyed ones, which aborted the process)."""
+    w = win
+    w.sync_timer.start(60_000); w.sleep_timer.start(60_000)
+    w._quitting = True; w.close(); wait(50)
+    assert not w.sync_timer.isActive() and not w.sleep_timer.isActive() and not w._autosave.isActive()

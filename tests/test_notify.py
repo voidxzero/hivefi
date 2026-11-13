@@ -71,6 +71,8 @@ def test_window_notifies_only_when_asked(win, fake_notify_send, monkeypatch):
     class Tray:
         shown = []
         def showMessage(self, a, b): self.shown.append((a, b))
+        def isVisible(self): return False
+        def hide(self): pass
     monkeypatch.setenv("PATH", "/nonexistent"); w.tray = Tray()
     w._on_now_playing(t); wait(800)
     assert Tray.shown and Tray.shown[0][0] == t["title"]
