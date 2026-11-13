@@ -172,6 +172,34 @@ def test_gapless_transition(tracks):
     be.shutdown()
 
 
+def test_eq_toggle_after_gapless_keeps_the_track(tracks):
+    """Turning the equalizer on/off rebuilds the chain. After a gapless change it reloaded the track that was
+    playing before (the deck still remembered that file), and one rebuilt in the last seconds of a track, with the
+    next one already queued on the playbin, made the engine report an advance that never happened."""
+    cfg, be, rec = new_backend(gapless=True, crossfade_ms=0)
+    a, b, c = tracks
+    g = be.gst
+    be.setSource(url(a)); be.set_next(url(b), True); be.play()
+    assert wait_for(lambda: rec.adv, 6000)
+    wait(500)
+    cfg.eq_enabled = not cfg.eq_enabled; be.apply_settings(); wait(700)
+    assert g.cur.pipe.get_property("current-uri").endswith("b.flac")          # still B, not A again
+    assert g._url.toString().endswith("b.flac") and len(rec.adv) == 1
+    assert be._url.toString().endswith("b.flac")                              # an engine fallback would resume B too
+    assert be.playbackState().name == "PlayingState"
+    # a rebuild after the next track was already handed to the playbin (about-to-finish)
+    be.setSource(url(a)); be.set_next(url(c), False); be.play()
+    n = len(rec.adv)
+    assert wait_for(lambda: g._gapless_pending, 6000), "about-to-finish never queued the next track"
+    cfg.eq_enabled = not cfg.eq_enabled; be.apply_settings(); wait(300)
+    assert g._url.toString().endswith("a.flac") and len(rec.adv) == n          # still A: no phantom advance
+    assert wait_for(lambda: len(rec.adv) > n, 8000)                            # ...and still gapless into C
+    wait(300)
+    assert g._url.toString().endswith("c.flac") and g.cur.pipe.get_property("current-uri").endswith("c.flac")
+    assert not rec.err
+    be.shutdown()
+
+
 def test_no_gapless_when_disabled(tracks):
     cfg, be, rec = new_backend(gapless=False, crossfade_ms=0)
     be.setSource(url(tracks[0])); be.set_next(url(tracks[1]), True); be.play()

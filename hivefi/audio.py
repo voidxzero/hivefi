@@ -516,8 +516,12 @@ class GstEngine(QObject):
         pos, st = cur.position() if cur.started() else 0, self._state
         cur.pipe.set_state(Gst.State.NULL)
         cur.build(self.cfg)
+        # A next track already handed to the playbin for gapless is dropped with the old pipeline: the rebuilt one
+        # asks again (about-to-finish). Left pending, the restarted current track would count as that advance.
+        self._gapless_pending = None
         if self._url.isValid():
-            cur.pipe.set_property("uri", cur.uri or self._url.toString())
+            cur.uri = self._url.toString()                   # what is playing now, also after a gapless change
+            cur.pipe.set_property("uri", cur.uri)
             if pos:
                 self._pending_seek = pos
             if st == PS.PlayingState:
@@ -739,6 +743,7 @@ class GstEngine(QObject):
             if t == Gst.MessageType.STREAM_START and m.src == cur.pipe and self._gapless_pending:
                 self._gapless_pending = None
                 self._url = self._next or self._url
+                cur.uri = self._url.toString()                  # the deck now plays this one
                 self._next, self._xf_planned = None, False
                 self._reset_tracking()
                 self._query_duration()
@@ -826,7 +831,7 @@ class Backend(QObject):
             g.durationChanged.connect(lambda v: self._fwd(g, self.durationChanged, v))
             g.playbackStateChanged.connect(lambda s: self._fwd(g, self.playbackStateChanged, s))
             g.mediaStatusChanged.connect(lambda s: self._fwd(g, self.mediaStatusChanged, s))
-            g.advanced.connect(lambda: self._fwd(g, self.advanced))
+            g.advanced.connect(self._gst_advanced)
             g.notice.connect(self.notice)
             g.visData.connect(lambda a, b: self._fwd(g, self.visData, a, b))
             g.streamTitle.connect(lambda s: self._fwd(g, self.streamTitle, s))
@@ -837,6 +842,13 @@ class Backend(QObject):
 
     @property
     def engine(self): return "gst" if self.active is self.gst else "qt"
+
+    def _gst_advanced(self):
+        """The GStreamer engine moved on by itself (gapless or crossfade): that is the track an engine switch or a
+        fallback must carry on with, not the one set last."""
+        if self.active is self.gst:
+            self._url = self.gst._url
+            self.advanced.emit()
 
     def _fwd(self, src, sig, *a):
         if src is self.active:

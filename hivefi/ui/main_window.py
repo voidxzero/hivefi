@@ -5,6 +5,7 @@ import sys
 import time
 from pathlib import Path
 
+from PyQt6 import sip
 from PyQt6.QtCore import QByteArray, QEvent, QEventLoop, QSize, Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import (QAction, QActionGroup, QColor, QCursor, QDesktopServices, QIcon, QKeySequence, QLinearGradient,
                          QPainter, QPixmap, QShortcut)
@@ -130,7 +131,10 @@ class WindowButtons(QWidget):
 
     def changeEvent(self, e):
         super().changeEvent(e)
-        if e.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange) and hasattr(self, "title"):
+        # style/font changes also arrive while the window is being torn down: its C++ side may already be gone,
+        # and an error raised here aborts the program (it did at every window close in the tests)
+        if e.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange) and hasattr(self, "title") \
+                and not sip.isdeleted(self.win):
             self.set_title(self.win.windowTitle())
 
     def toggle(self):
